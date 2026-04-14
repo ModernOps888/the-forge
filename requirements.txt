@@ -1,0 +1,2 @@
+# The Forge — Dependencies
+# Zero heavy dependencies. Pure Python + Vitalis CLI integration.

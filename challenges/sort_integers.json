@@ -1,0 +1,17 @@
+{
+    "name": "Sort Integers",
+    "description": "Write a function that sorts an array of 64-bit integers in ascending order. The function should handle empty arrays, single-element arrays, and arrays with duplicate values.",
+    "function_signature": "fn sort(arr: [i64]) -> [i64]",
+    "test_cases": [
+        {"call": "sort([])", "expected": "[]"},
+        {"call": "sort([1])", "expected": "[1]"},
+        {"call": "sort([3, 1, 2])", "expected": "[1, 2, 3]"},
+        {"call": "sort([5, 3, 8, 1, 2])", "expected": "[1, 2, 3, 5, 8]"},
+        {"call": "sort([1, 1, 1])", "expected": "[1, 1, 1]"}
+    ],
+    "constraints": {
+        "time_ms": 100,
+        "memory_kb": 1024
+    },
+    "difficulty": 3
+}
