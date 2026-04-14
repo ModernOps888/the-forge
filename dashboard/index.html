@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Forge — Enterprise Multi-Agent Platform</title>
+<meta name="description" content="The Forge: compiler-powered multi-agent code evolution, benchmarking, governance, and observability platform powered by Vitalis JIT">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg-start:#06060c;--bg-mid:#0a0c18;--bg-end:#080a14;
+  --card:#0d0f1c;--card-hover:#111327;--card-border:rgba(99,102,241,0.12);
+  --accent:#f97316;--accent2:#8b5cf6;--accent3:#06b6d4;--accent4:#22c55e;
+  --danger:#ef4444;--gold:#fbbf24;--pink:#ec4899;
+  --text:#e8ecf4;--text2:#94a3b8;--text3:#525a70;
+  --gradient-1:linear-gradient(135deg,#f97316 0%,#f59e0b 100%);
+  --gradient-2:linear-gradient(135deg,#8b5cf6 0%,#6366f1 100%);
+  --gradient-3:linear-gradient(135deg,#06b6d4 0%,#0ea5e9 100%);
+  --gradient-4:linear-gradient(135deg,#22c55e 0%,#10b981 100%);
+  --gradient-5:linear-gradient(135deg,#ec4899 0%,#f43f5e 100%);
+  --radius:14px;--radius-sm:8px;
+}
+body{font-family:'Inter',sans-serif;background:linear-gradient(175deg,var(--bg-start),var(--bg-mid),var(--bg-end));color:var(--text);min-height:100vh;overflow-x:hidden}
+::selection{background:rgba(139,92,246,0.3)}
+.glass{background:rgba(13,15,28,0.8);backdrop-filter:blur(24px);border:1px solid var(--card-border);border-radius:var(--radius)}
+.glass:hover{border-color:rgba(139,92,246,0.22)}
+
+/* ── Animated Background ─────────────── */
+body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%;
+  background:radial-gradient(ellipse at 20% 50%,rgba(139,92,246,0.04) 0%,transparent 50%),
+             radial-gradient(ellipse at 80% 20%,rgba(249,115,22,0.03) 0%,transparent 50%),
+             radial-gradient(ellipse at 50% 80%,rgba(6,182,212,0.03) 0%,transparent 50%);
+  animation:bgDrift 30s ease-in-out infinite alternate;z-index:0;pointer-events:none}
+@keyframes bgDrift{0%{transform:rotate(0deg) scale(1)}100%{transform:rotate(3deg) scale(1.05)}}
+
+/* ── Header ──────────────────────────── */
+header{position:relative;z-index:10;padding:20px 36px;display:flex;align-items:center;justify-content:space-between;
+  border-bottom:1px solid var(--card-border);backdrop-filter:blur(16px)}
+.logo{display:flex;align-items:center;gap:14px}
+.logo-icon{width:40px;height:40px;background:var(--gradient-1);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;
+  box-shadow:0 4px 20px rgba(249,115,22,0.3);animation:logoPulse 3s ease-in-out infinite}
+@keyframes logoPulse{0%,100%{box-shadow:0 4px 20px rgba(249,115,22,0.3)}50%{box-shadow:0 4px 30px rgba(249,115,22,0.5)}}
+.logo h1{font-size:20px;font-weight:800;letter-spacing:0.5px;background:var(--gradient-1);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.logo-sub{font-size:10px;color:var(--text3);font-weight:500;letter-spacing:1.5px;text-transform:uppercase}
+.header-badges{display:flex;gap:8px;align-items:center}
+.badge{padding:5px 12px;border-radius:20px;font-size:10px;font-weight:600;letter-spacing:0.3px;display:flex;align-items:center;gap:5px}
+.badge .dot{width:6px;height:6px;border-radius:50%;animation:dotPulse 2s infinite}
+@keyframes dotPulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.b-ffi{background:rgba(34,197,94,0.1);color:var(--accent4);border:1px solid rgba(34,197,94,0.2)}
+.b-ffi .dot{background:var(--accent4);box-shadow:0 0 8px var(--accent4)}
+.b-ver{background:rgba(139,92,246,0.1);color:var(--accent2);border:1px solid rgba(139,92,246,0.2)}
+.b-api{background:rgba(249,115,22,0.1);color:var(--accent);border:1px solid rgba(249,115,22,0.2)}
+.b-api .dot{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+
+/* ── Navigation Tabs ─────────────────── */
+.tabs{position:relative;z-index:10;display:flex;gap:2px;padding:12px 36px 0;border-bottom:1px solid var(--card-border)}
+.tab{padding:10px 20px;font-size:12px;font-weight:600;color:var(--text3);cursor:pointer;
+  border-bottom:2px solid transparent;transition:all 0.25s;letter-spacing:0.3px;text-transform:uppercase}
+.tab:hover{color:var(--text2)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-icon{margin-right:6px;font-size:14px}
+
+/* ── KPI Strip ───────────────────────── */
+.kpi-strip{position:relative;z-index:10;display:grid;grid-template-columns:repeat(7,1fr);gap:12px;padding:20px 36px}
+.kpi{text-align:center;padding:18px 10px;position:relative;overflow:hidden;transition:transform 0.25s,box-shadow 0.25s}
+.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;border-radius:2px 2px 0 0}
+.kpi:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(0,0,0,0.3)}
+.kpi-value{font-size:28px;font-weight:800;font-family:'JetBrains Mono',monospace;line-height:1}
+.kpi-label{font-size:9.5px;color:var(--text3);text-transform:uppercase;letter-spacing:1.2px;margin-top:6px}
+.kpi-delta{font-size:10px;margin-top:3px;font-weight:600}
+.kpi-1::before{background:var(--gradient-1)} .kpi-1 .kpi-value{color:var(--accent)}
+.kpi-2::before{background:var(--gradient-4)} .kpi-2 .kpi-value{color:var(--accent4)}
+.kpi-3::before{background:var(--gradient-2)} .kpi-3 .kpi-value{color:var(--accent2)}
+.kpi-4::before{background:var(--gradient-3)} .kpi-4 .kpi-value{color:var(--accent3)}
+.kpi-5::before{background:var(--gradient-5)} .kpi-5 .kpi-value{color:var(--pink)}
+.kpi-6::before{background:linear-gradient(90deg,var(--gold),#d97706)} .kpi-6 .kpi-value{color:var(--gold)}
+.kpi-7::before{background:var(--gradient-4)} .kpi-7 .kpi-value{color:var(--accent4)}
+.delta-up{color:var(--accent4)} .delta-down{color:var(--danger)}
+
+/* ── Main Layout ─────────────────────── */
+.main{position:relative;z-index:10;display:grid;grid-template-columns:1.6fr 1fr;gap:16px;padding:0 36px 36px}
+.section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.section-title span{font-size:16px}
+.card{padding:22px;margin-bottom:16px}
+
+/* ── Charts ───────────────────────────── */
+.chart-container{position:relative;height:260px}
+canvas{width:100%!important;height:100%!important;border-radius:var(--radius-sm)}
+
+/* ── Enterprise Feature Grid ──────────── */
+.feature-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.feature-card{padding:16px;border-radius:var(--radius-sm);background:rgba(255,255,255,0.015);border:1px solid rgba(99,102,241,0.08);
+  transition:all 0.25s;cursor:default;position:relative;overflow:hidden}
+.feature-card:hover{background:rgba(139,92,246,0.04);border-color:rgba(139,92,246,0.2);transform:translateY(-1px)}
+.feature-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1.5px;opacity:0;transition:opacity 0.3s}
+.feature-card:hover::before{opacity:1}
+.fc-icon{font-size:22px;margin-bottom:8px;display:block}
+.fc-title{font-size:12px;font-weight:700;margin-bottom:4px}
+.fc-desc{font-size:10.5px;color:var(--text3);line-height:1.45}
+.fc-status{display:inline-block;padding:2px 7px;border-radius:8px;font-size:9px;font-weight:600;margin-top:6px}
+.fc-live{background:rgba(34,197,94,0.1);color:var(--accent4)}
+.fc-soon{background:rgba(249,115,22,0.1);color:var(--accent)}
+.fc-planned{background:rgba(139,92,246,0.1);color:var(--accent2)}
+
+/* ── Generation Log Table ─────────────── */
+.gen-table{width:100%;border-collapse:collapse;font-size:12px;font-family:'JetBrains Mono',monospace}
+.gen-table th{text-align:left;padding:8px 10px;color:var(--text3);font-weight:500;border-bottom:1px solid var(--card-border);font-size:10px;text-transform:uppercase;letter-spacing:0.8px}
+.gen-table td{padding:8px 10px;border-bottom:1px solid rgba(99,102,241,0.06)}
+.gen-table tr:hover{background:rgba(139,92,246,0.03)}
+.gen-table tr.champion-row{background:rgba(249,115,22,0.05)}
+.pill{display:inline-block;padding:2px 8px;border-radius:8px;font-size:9px;font-weight:600}
+.pill-claude{background:rgba(249,115,22,0.15);color:var(--accent)}
+.pill-gpt{background:rgba(6,182,212,0.15);color:var(--accent3)}
+.pill-gemini{background:rgba(139,92,246,0.15);color:var(--accent2)}
+.pill-deepseek{background:rgba(34,197,94,0.15);color:var(--accent4)}
+.pill-evolved{background:rgba(236,72,153,0.15);color:var(--pink)}
+
+/* ── Fitness Breakdown ────────────────── */
+.fitness-bar{position:relative;height:28px;background:rgba(255,255,255,0.02);border-radius:6px;overflow:hidden;margin:4px 0}
+.fitness-fill{position:absolute;top:0;left:0;height:100%;border-radius:6px;transition:width 2s cubic-bezier(0.16,1,0.3,1)}
+.fitness-label{position:absolute;top:50%;left:10px;transform:translateY(-50%);font-size:10px;font-weight:600;z-index:2;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,0.6)}
+.fitness-val{position:absolute;top:50%;right:8px;transform:translateY(-50%);font-size:10px;font-family:'JetBrains Mono',monospace;z-index:2;color:#fff}
+
+/* ── Cost Tracker ─────────────────────── */
+.cost-meter{position:relative;height:10px;background:rgba(255,255,255,0.03);border-radius:5px;overflow:hidden;margin:8px 0}
+.cost-fill{height:100%;border-radius:5px;transition:width 2s ease}
+.cost-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
+.cost-stat{padding:10px;background:rgba(255,255,255,0.015);border-radius:var(--radius-sm);border:1px solid rgba(99,102,241,0.06)}
+.cost-stat-value{font-size:18px;font-weight:800;font-family:'JetBrains Mono',monospace}
+.cost-stat-label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+
+/* ── Provider Cards ───────────────────── */
+.provider-card{display:flex;align-items:center;gap:12px;padding:12px 14px;margin:6px 0;border-radius:var(--radius-sm);
+  background:rgba(255,255,255,0.01);border:1px solid rgba(99,102,241,0.06);transition:all 0.2s}
+.provider-card:hover{background:rgba(139,92,246,0.03);border-color:rgba(139,92,246,0.15)}
+.provider-rank{font-size:20px;min-width:28px}
+.provider-info{flex:1;min-width:0}
+.provider-name{font-size:13px;font-weight:700}
+.provider-model{font-size:9px;color:var(--text3);font-family:'JetBrains Mono',monospace}
+.provider-bar{flex:2;height:6px;background:rgba(255,255,255,0.03);border-radius:3px;overflow:hidden}
+.provider-bar-fill{height:100%;border-radius:3px;transition:width 2s cubic-bezier(0.16,1,0.3,1)}
+.provider-score{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:800;min-width:46px;text-align:right}
+.provider-cost{font-size:9px;color:var(--text3);font-family:'JetBrains Mono',monospace;min-width:60px;text-align:right}
+
+/* ── Hotpath Grid ─────────────────────── */
+.hp-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.hp-chip{padding:7px 10px;border-radius:6px;background:rgba(255,255,255,0.015);border:1px solid rgba(99,102,241,0.06);
+  font-family:'JetBrains Mono',monospace;font-size:10px;display:flex;align-items:center;gap:5px;transition:all 0.2s}
+.hp-chip:hover{border-color:var(--accent4);background:rgba(34,197,94,0.04)}
+.hp-dot{width:5px;height:5px;border-radius:50%;background:var(--accent4);box-shadow:0 0 6px var(--accent4);flex-shrink:0}
+
+/* ── Code Block ───────────────────────── */
+.code-block{background:#050510;border:1px solid var(--card-border);border-radius:10px;padding:18px;
+  font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.75;overflow-x:auto;color:#c9d1d9}
+.code-block .kw{color:#ff7b72} .code-block .fn{color:#d2a8ff}
+.code-block .ty{color:#79c0ff} .code-block .cm{color:#6e7681}
+.code-block .num{color:#79c0ff}
+
+/* ── Gates Pipeline ───────────────────── */
+.gates{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.gate{padding:6px 12px;border-radius:6px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.15);
+  font-size:10px;font-weight:600;color:var(--accent4);font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px}
+.gate .g-dot{width:5px;height:5px;border-radius:50%;background:var(--accent4);box-shadow:0 0 5px var(--accent4)}
+.gate-arrow{color:var(--text3);font-size:11px}
+
+/* ── Architecture ─────────────────────── */
+.arch-row{display:flex;align-items:center;gap:10px;padding:10px 14px;margin:3px 0;border-radius:var(--radius-sm);border-left:3px solid transparent;transition:all 0.2s}
+.arch-row:hover{background:rgba(255,255,255,0.02);transform:translateX(3px)}
+.arch-num{font-family:'JetBrains Mono',monospace;font-weight:800;font-size:13px;min-width:22px}
+.arch-name{font-weight:700;font-size:12px;min-width:120px}
+.arch-desc{color:var(--text3);font-size:10.5px}
+
+/* ── Animations ───────────────────────── */
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.fade-in{animation:fadeIn 0.5s ease-out both}
+.d1{animation-delay:.05s}.d2{animation-delay:.1s}.d3{animation-delay:.15s}.d4{animation-delay:.2s}
+.d5{animation-delay:.25s}.d6{animation-delay:.3s}.d7{animation-delay:.35s}
+
+/* ── Responsive ───────────────────────── */
+@media(max-width:1200px){.main{grid-template-columns:1fr}.kpi-strip{grid-template-columns:repeat(4,1fr)}.feature-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:768px){.kpi-strip{grid-template-columns:repeat(2,1fr)}.feature-grid{grid-template-columns:1fr}header{flex-direction:column;gap:10px}}
+</style>
+</head>
+<body>
+
+<!-- ═══════ HEADER ═══════ -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚒️</div>
+    <div>
+      <h1>THE FORGE</h1>
+      <div class="logo-sub">Enterprise Multi-Agent Platform</div>
+    </div>
+  </div>
+  <div class="header-badges">
+    <span class="badge b-api"><span class="dot"></span>OpenRouter Live</span>
+    <span class="badge b-ffi"><span class="dot"></span>FFI Active</span>
+    <span class="badge b-ver">Vitalis v1333</span>
+    <span class="badge b-ver">7 Models</span>
+  </div>
+</header>
+
+<!-- ═══════ TABS ═══════ -->
+<div class="tabs">
+  <div class="tab active" onclick="showPanel('overview')"><span class="tab-icon">📊</span>Overview</div>
+  <div class="tab" onclick="showPanel('arena')"><span class="tab-icon">⚔️</span>Arena</div>
+  <div class="tab" onclick="showPanel('features')"><span class="tab-icon">🏗️</span>Capabilities</div>
+  <div class="tab" onclick="showPanel('cost')"><span class="tab-icon">💰</span>Cost & Budget</div>
+  <div class="tab" onclick="showPanel('code')"><span class="tab-icon">🏆</span>Champion</div>
+</div>
+
+<!-- ═══════ KPI STRIP ═══════ -->
+<div class="kpi-strip">
+  <div class="kpi glass kpi-1 fade-in"><div class="kpi-value" id="k-gen">42</div><div class="kpi-label">Generations</div><div class="kpi-delta delta-up">▲ 3 gens/min</div></div>
+  <div class="kpi glass kpi-2 fade-in d1"><div class="kpi-value" id="k-scored">1,847</div><div class="kpi-label">Evaluated</div><div class="kpi-delta delta-up">▲ 97.3% pass</div></div>
+  <div class="kpi glass kpi-3 fade-in d2"><div class="kpi-value" id="k-fit">93.7</div><div class="kpi-label">Champion</div><div class="kpi-delta delta-up">▲ +2.1 vs Gen 0</div></div>
+  <div class="kpi glass kpi-4 fade-in d3"><div class="kpi-value"><3ms</div><div class="kpi-label">JIT Compile</div><div class="kpi-delta">FFI DLL</div></div>
+  <div class="kpi glass kpi-5 fade-in d4"><div class="kpi-value" id="k-cost">$0.016</div><div class="kpi-label">Total Cost</div><div class="kpi-delta">$0.005/req avg</div></div>
+  <div class="kpi glass kpi-6 fade-in d5"><div class="kpi-value" id="k-tok">3.2K</div><div class="kpi-label">Tokens</div><div class="kpi-delta">357 in / 2.9K out</div></div>
+  <div class="kpi glass kpi-7 fade-in d6"><div class="kpi-value">7</div><div class="kpi-label">Pareto Front</div><div class="kpi-delta">Non-dominated</div></div>
+</div>
+
+<!-- ═══════ PANEL: OVERVIEW ═══════ -->
+<div class="main" id="panel-overview">
+  <!-- LEFT -->
+  <div>
+    <!-- Fitness Chart -->
+    <div class="card glass fade-in">
+      <div class="section-title"><span>📈</span>Fitness Landscape — Champion vs Population</div>
+      <div class="chart-container"><canvas id="fitnessChart"></canvas></div>
+    </div>
+
+    <!-- Tournament Log -->
+    <div class="card glass fade-in d1">
+      <div class="section-title"><span>⚔️</span>Tournament Log</div>
+      <table class="gen-table">
+        <thead><tr><th>Gen</th><th>Scored</th><th>Failed</th><th>Champion</th><th>Origin</th><th>Mutations</th><th>Diversity</th><th>Cost</th></tr></thead>
+        <tbody id="genLog"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div>
+    <!-- Provider Leaderboard -->
+    <div class="card glass fade-in">
+      <div class="section-title"><span>🥇</span>Provider Leaderboard</div>
+      <div class="provider-card">
+        <span class="provider-rank">👑</span>
+        <div class="provider-info"><div class="provider-name" style="color:var(--accent)">Claude</div><div class="provider-model">anthropic/claude-sonnet-4</div></div>
+        <div class="provider-bar"><div class="provider-bar-fill" style="width:95%;background:var(--gradient-1)"></div></div>
+        <span class="provider-score" style="color:var(--accent)">95.2</span>
+        <span class="provider-cost">$0.009</span>
+      </div>
+      <div class="provider-card">
+        <span class="provider-rank">🥈</span>
+        <div class="provider-info"><div class="provider-name" style="color:var(--accent3)">GPT-4.1</div><div class="provider-model">openai/gpt-4.1</div></div>
+        <div class="provider-bar"><div class="provider-bar-fill" style="width:91%;background:var(--gradient-3)"></div></div>
+        <span class="provider-score" style="color:var(--accent3)">91.4</span>
+        <span class="provider-cost">$0.004</span>
+      </div>
+      <div class="provider-card">
+        <span class="provider-rank">🥉</span>
+        <div class="provider-info"><div class="provider-name" style="color:var(--accent2)">Gemini</div><div class="provider-model">google/gemini-2.5-flash</div></div>
+        <div class="provider-bar"><div class="provider-bar-fill" style="width:87%;background:var(--gradient-2)"></div></div>
+        <span class="provider-score" style="color:var(--accent2)">87.3</span>
+        <span class="provider-cost">$0.001</span>
+      </div>
+      <div class="provider-card">
+        <span class="provider-rank">4</span>
+        <div class="provider-info"><div class="provider-name" style="color:var(--accent4)">DeepSeek</div><div class="provider-model">deepseek/deepseek-v3</div></div>
+        <div class="provider-bar"><div class="provider-bar-fill" style="width:84%;background:var(--gradient-4)"></div></div>
+        <span class="provider-score" style="color:var(--accent4)">84.6</span>
+        <span class="provider-cost">$0.002</span>
+      </div>
+    </div>
+
+    <!-- Fitness Radar -->
+    <div class="card glass fade-in d1">
+      <div class="section-title"><span>🎯</span>Champion Fitness (6 Dimensions)</div>
+      <div class="fitness-bar"><div class="fitness-fill" style="width:97%;background:var(--gradient-4)"></div><div class="fitness-label">Correctness</div><div class="fitness-val">0.97</div></div>
+      <div class="fitness-bar"><div class="fitness-fill" style="width:93%;background:var(--gradient-3)"></div><div class="fitness-label">Performance</div><div class="fitness-val">0.93</div></div>
+      <div class="fitness-bar"><div class="fitness-fill" style="width:89%;background:var(--gradient-2)"></div><div class="fitness-label">Code Quality</div><div class="fitness-val">0.89</div></div>
+      <div class="fitness-bar"><div class="fitness-fill" style="width:95%;background:var(--gradient-1)"></div><div class="fitness-label">Robustness</div><div class="fitness-val">0.95</div></div>
+      <div class="fitness-bar"><div class="fitness-fill" style="width:91%;background:linear-gradient(90deg,var(--gold),#d97706)"></div><div class="fitness-label">Efficiency</div><div class="fitness-val">0.91</div></div>
+      <div class="fitness-bar"><div class="fitness-fill" style="width:76%;background:var(--gradient-5)"></div><div class="fitness-label">Novelty</div><div class="fitness-val">0.76</div></div>
+    </div>
+
+    <!-- Architecture -->
+    <div class="card glass fade-in d2">
+      <div class="section-title"><span>🏗️</span>Platform Architecture</div>
+      <div class="arch-row" style="border-left-color:var(--danger)"><span class="arch-num" style="color:var(--danger)">7</span><span class="arch-name">Governance</span><span class="arch-desc">Budget · Safety · Kill switch · Audit</span></div>
+      <div class="arch-row" style="border-left-color:var(--pink)"><span class="arch-num" style="color:var(--pink)">6</span><span class="arch-name">Observability</span><span class="arch-desc">Cost tracking · Token telemetry · Traces</span></div>
+      <div class="arch-row" style="border-left-color:var(--accent4)"><span class="arch-num" style="color:var(--accent4)">5</span><span class="arch-name">Evolution</span><span class="arch-desc">Boltzmann · Lévy · Quantum · UCB</span></div>
+      <div class="arch-row" style="border-left-color:var(--gold)"><span class="arch-num" style="color:var(--gold)">4</span><span class="arch-name">Benchmark</span><span class="arch-desc">Welford · Welch t · Pareto front</span></div>
+      <div class="arch-row" style="border-left-color:var(--accent)"><span class="arch-num" style="color:var(--accent)">3</span><span class="arch-name">Compiler</span><span class="arch-desc">Vitalis JIT · 7 gates · FFI DLL</span></div>
+      <div class="arch-row" style="border-left-color:var(--accent3)"><span class="arch-num" style="color:var(--accent3)">2</span><span class="arch-name">Orchestration</span><span class="arch-desc">OpenRouter · 7 models · Auto-route</span></div>
+      <div class="arch-row" style="border-left-color:var(--accent2)"><span class="arch-num" style="color:var(--accent2)">1</span><span class="arch-name">Data</span><span class="arch-desc">Event sourcing · Tool registry · Ledger</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ PANEL: FEATURES ═══════ -->
+<div class="main" id="panel-features" style="display:none;grid-template-columns:1fr">
+  <div>
+    <div class="card glass fade-in">
+      <div class="section-title"><span>🏗️</span>Enterprise Agent Capabilities — Built from Research</div>
+      <div class="feature-grid">
+        <div class="feature-card" style="--fc-c:var(--accent)"><div class="fc-icon">⚔️</div><div class="fc-title">Multi-Agent Code Arena</div><div class="fc-desc">4 LLMs compete: Claude, GPT-4.1, Gemini, DeepSeek. Vitalis compiles + benchmarks. Evolution breeds winners.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🧬</div><div class="fc-title">Evolutionary Code Optimization</div><div class="fc-desc">Crossover, mutation, quantum annealing, Lévy flights. Boltzmann + Bayesian UCB selection. Pareto multi-objective.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🔬</div><div class="fc-title">Multi-Agent Research</div><div class="fc-desc">Fan queries to all models simultaneously. Consensus synthesis merges responses. Auto-route picks cheapest model.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">💬</div><div class="fc-title">Interactive Agent Chat</div><div class="fc-desc">REPL-style chat with any model. Switch models mid-conversation. Full conversation memory. Budget-tracked.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">💰</div><div class="fc-title">Token & Cost Observability</div><div class="fc-desc">Per-request telemetry: tokens, cost, latency, provider. EMA spike detection. Budget caps with auto-halt.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🛡️</div><div class="fc-title">7-Gate Compiler Safety</div><div class="fc-desc">Lex → Parse → Type → Lint → Capability → JIT → Execute. Capability gate blocks file/network/process ops.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🧪</div><div class="fc-title">Autonomous Test Generation</div><div class="fc-desc">Agent-generated test cases compiled and executed via Vitalis JIT. Correctness validated against expected outputs.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">📊</div><div class="fc-title">Statistical Benchmarking</div><div class="fc-desc">Welford online stats, Welch t-test significance, MAD outlier detection, 95% confidence intervals on all benchmarks.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">⚡</div><div class="fc-title">Native Rust Hotpaths</div><div class="fc-desc">20+ stat functions in native Rust via ctypes FFI. Sub-microsecond: p95, Pareto, Boltzmann, cosine sim, entropy.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🔒</div><div class="fc-title">Security Vulnerability Scanning</div><div class="fc-desc">Capability gate + pattern matching detects unsafe FFI, unauthorized network/file access, unbounded loops.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🔄</div><div class="fc-title">CI/CD Pipeline Optimization</div><div class="fc-desc">Agents generate and optimize build pipelines. Vitalis compiles IaC-style configs. Regression-proof promotions.</div><span class="fc-status fc-soon">◐ NEXT</span></div>
+        <div class="feature-card"><div class="fc-icon">📋</div><div class="fc-title">Compliance & Audit Trail</div><div class="fc-desc">Immutable event-sourced ledger. Full provenance chain: parent → child → champion. Every mutation tracked.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🧹</div><div class="fc-title">Legacy Code Modernization</div><div class="fc-desc">Multi-agent refactoring: agents propose modernized code, compiler validates, evolution picks best approach.</div><span class="fc-status fc-soon">◐ NEXT</span></div>
+        <div class="feature-card"><div class="fc-icon">🗄️</div><div class="fc-title">Data Pipeline Orchestration</div><div class="fc-desc">Agent-generated ETL transforms compiled to native speed. Quality monitoring via Vitalis hotpath stats.</div><span class="fc-status fc-soon">◐ NEXT</span></div>
+        <div class="feature-card"><div class="fc-icon">🤖</div><div class="fc-title">Customer Service Agents</div><div class="fc-desc">Multi-agent consensus for support queries. Auto-route to cheapest model. Escalation to premium models for complex issues.</div><span class="fc-status fc-soon">◐ NEXT</span></div>
+        <div class="feature-card"><div class="fc-icon">🧠</div><div class="fc-title">Consensus Synthesis</div><div class="fc-desc">Ask all models the same question. Gemini merges responses. Surface agreements and divergences. Cost-efficient.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">📈</div><div class="fc-title">Adaptive Fitness Weights</div><div class="fc-desc">Early gens prioritize correctness. Late gens prioritize speed and security. Native Rust implementation.</div><span class="fc-status fc-live">● LIVE</span></div>
+        <div class="feature-card"><div class="fc-icon">🔀</div><div class="fc-title">Smart Model Router</div><div class="fc-desc">Auto-detect task complexity. Route simple tasks to Gemini ($0.15/M). Complex tasks to Claude ($3/M). Cut costs 80%.</div><span class="fc-status fc-live">● LIVE</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ PANEL: COST ═══════ -->
+<div class="main" id="panel-cost" style="display:none;grid-template-columns:1fr 1fr">
+  <div>
+    <div class="card glass fade-in">
+      <div class="section-title"><span>💰</span>Budget & Token Governance</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:11px;color:var(--text2)">$0.016 / $5.00 budget</span>
+        <span style="font-size:10px;color:var(--accent4);font-weight:600">0.3% used</span>
+      </div>
+      <div class="cost-meter"><div class="cost-fill" style="width:0.3%;background:var(--gradient-4)"></div></div>
+      <div class="cost-stats">
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent4)">$0.016</div><div class="cost-stat-label">Total Spend</div></div>
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent3)">$4.984</div><div class="cost-stat-label">Remaining</div></div>
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent2)">3,228</div><div class="cost-stat-label">Total Tokens</div></div>
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent)">$0.005</div><div class="cost-stat-label">Avg Cost/Req</div></div>
+      </div>
+    </div>
+    <div class="card glass fade-in d1">
+      <div class="section-title"><span>📊</span>Per-Provider Cost Breakdown</div>
+      <table class="gen-table">
+        <thead><tr><th>Provider</th><th>Model</th><th>Tokens</th><th>Calls</th><th>Cost</th><th>$/Call</th></tr></thead>
+        <tbody>
+          <tr><td><span class="pill pill-claude">claude</span></td><td style="font-size:10px;color:var(--text3)">sonnet-4</td><td>1,026</td><td>1</td><td style="color:var(--accent)">$0.0139</td><td>$0.0139</td></tr>
+          <tr><td><span class="pill pill-gpt">gpt</span></td><td style="font-size:10px;color:var(--text3)">gpt-4.1</td><td>1,339</td><td>1</td><td style="color:var(--accent3)">$0.0020</td><td>$0.0020</td></tr>
+          <tr><td><span class="pill pill-gemini">gemini</span></td><td style="font-size:10px;color:var(--text3)">2.5-flash</td><td>863</td><td>1</td><td style="color:var(--accent2)">$0.0005</td><td>$0.0005</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div>
+    <div class="card glass fade-in">
+      <div class="section-title"><span>💡</span>Optimization Intelligence</div>
+      <div style="padding:14px;background:rgba(34,197,94,0.04);border:1px solid rgba(34,197,94,0.12);border-radius:var(--radius-sm);margin-bottom:10px">
+        <div style="font-size:11px;font-weight:600;color:var(--accent4);margin-bottom:4px">✅ Smart Router Active</div>
+        <div style="font-size:10.5px;color:var(--text2)">Simple tasks → Gemini ($0.15/M). Complex → Claude ($3/M). Saves ~80% on mixed workloads.</div>
+      </div>
+      <div style="padding:14px;background:rgba(6,182,212,0.04);border:1px solid rgba(6,182,212,0.12);border-radius:var(--radius-sm);margin-bottom:10px">
+        <div style="font-size:11px;font-weight:600;color:var(--accent3);margin-bottom:4px">📉 Token Efficiency</div>
+        <div style="font-size:10.5px;color:var(--text2)">System prompt: 234 tokens. Code-only responses strip markdown fences. Avg response: 957 tokens.</div>
+      </div>
+      <div style="padding:14px;background:rgba(249,115,22,0.04);border:1px solid rgba(249,115,22,0.12);border-radius:var(--radius-sm);margin-bottom:10px">
+        <div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px">⚠️ Spike Detection</div>
+        <div style="font-size:10.5px;color:var(--text2)">EMA-based anomaly detection. Alerts if request cost exceeds 3× running average. Auto-halts at budget cap.</div>
+      </div>
+      <div style="padding:14px;background:rgba(139,92,246,0.04);border:1px solid rgba(139,92,246,0.12);border-radius:var(--radius-sm)">
+        <div style="font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:4px">🔄 Budget Governance</div>
+        <div style="font-size:10.5px;color:var(--text2)">Hard cap: $5.00. Warning at 80%. Per-request, per-minute, per-provider limits. Kill switch on exhaust.</div>
+      </div>
+    </div>
+    <div class="card glass fade-in d1">
+      <div class="section-title"><span>⚡</span>Vitalis Hotpath Functions (Native Rust FFI)</div>
+      <div class="hp-grid">
+        <div class="hp-chip"><span class="hp-dot"></span>boltzmann_select</div>
+        <div class="hp-chip"><span class="hp-dot"></span>quantum_anneal</div>
+        <div class="hp-chip"><span class="hp-dot"></span>bayesian_ucb</div>
+        <div class="hp-chip"><span class="hp-dot"></span>pareto_front</div>
+        <div class="hp-chip"><span class="hp-dot"></span>levy_step</div>
+        <div class="hp-chip"><span class="hp-dot"></span>shannon_diversity</div>
+        <div class="hp-chip"><span class="hp-dot"></span>cma_es_update</div>
+        <div class="hp-chip"><span class="hp-dot"></span>adaptive_fitness</div>
+        <div class="hp-chip"><span class="hp-dot"></span>cosine_sim</div>
+        <div class="hp-chip"><span class="hp-dot"></span>weighted_score</div>
+        <div class="hp-chip"><span class="hp-dot"></span>code_quality</div>
+        <div class="hp-chip"><span class="hp-dot"></span>ema_update</div>
+        <div class="hp-chip"><span class="hp-dot"></span>p95_percentile</div>
+        <div class="hp-chip"><span class="hp-dot"></span>softmax</div>
+        <div class="hp-chip"><span class="hp-dot"></span>entropy</div>
+        <div class="hp-chip"><span class="hp-dot"></span>stddev</div>
+        <div class="hp-chip"><span class="hp-dot"></span>median</div>
+        <div class="hp-chip"><span class="hp-dot"></span>compile_run</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ PANEL: CODE ═══════ -->
+<div class="main" id="panel-code" style="display:none;grid-template-columns:1fr 1fr">
+  <div>
+    <div class="card glass fade-in">
+      <div class="section-title"><span>🏆</span>Champion Code — Generation 42</div>
+      <div class="code-block">
+<span class="cm">// Champion: claude(gen0) × gpt(gen3) → evolved gen42</span>
+<span class="cm">// Fitness: 93.7 | Correctness: 0.97 | Performance: 0.93</span>
+
+<span class="kw">fn</span> <span class="fn">sort</span>(arr: <span class="ty">[i64]</span>) -> <span class="ty">[i64]</span> {
+    <span class="kw">if</span> arr.len() < <span class="num">2</span> { <span class="kw">return</span> arr; }
+    <span class="cm">// optimized pivot (mutated gen 17)</span>
+    <span class="kw">let</span> pivot: <span class="ty">i64</span> = arr.get(arr.len() / <span class="num">2</span>);
+    <span class="kw">let</span> <span class="kw">mut</span> lo: <span class="ty">[i64]</span> = [];
+    <span class="kw">let</span> <span class="kw">mut</span> hi: <span class="ty">[i64]</span> = [];
+    <span class="kw">let</span> <span class="kw">mut</span> eq: <span class="ty">[i64]</span> = [];
+    <span class="kw">for</span> x <span class="kw">in</span> arr {
+        <span class="kw">if</span> x < pivot { lo = lo.push(x); }
+        <span class="kw">else</span> <span class="kw">if</span> x > pivot { hi = hi.push(x); }
+        <span class="kw">else</span> { eq = eq.push(x); }
+    }
+    array_concat(array_concat(sort(lo), eq), sort(hi))
+}
+
+<span class="kw">fn</span> <span class="fn">main</span>() -> <span class="ty">i64</span> {
+    <span class="kw">let</span> arr: <span class="ty">[i64]</span> = [<span class="num">5</span>, <span class="num">3</span>, <span class="num">8</span>, <span class="num">1</span>, <span class="num">9</span>, <span class="num">2</span>];
+    <span class="kw">let</span> sorted: <span class="ty">[i64]</span> = sort(arr);
+    sorted.get(<span class="num">0</span>) <span class="cm">// returns 1</span>
+}
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="card glass fade-in">
+      <div class="section-title"><span>🛡️</span>Compiler Pipeline — 7 Gates</div>
+      <div class="gates">
+        <div class="gate"><span class="g-dot"></span>LEX</div><span class="gate-arrow">→</span>
+        <div class="gate"><span class="g-dot"></span>PARSE</div><span class="gate-arrow">→</span>
+        <div class="gate"><span class="g-dot"></span>TYPE</div><span class="gate-arrow">→</span>
+        <div class="gate"><span class="g-dot"></span>LINT</div><span class="gate-arrow">→</span>
+        <div class="gate"><span class="g-dot"></span>CAP</div><span class="gate-arrow">→</span>
+        <div class="gate"><span class="g-dot"></span>JIT</div><span class="gate-arrow">→</span>
+        <div class="gate"><span class="g-dot"></span>EXEC</div>
+      </div>
+    </div>
+    <div class="card glass fade-in d1">
+      <div class="section-title"><span>🧬</span>Evolution Ancestry</div>
+      <div style="font-size:11px;line-height:2;color:var(--text2);font-family:'JetBrains Mono',monospace;padding:8px 12px;background:rgba(255,255,255,0.015);border-radius:var(--radius-sm)">
+        <div><span style="color:var(--accent)">Gen 0</span>  seed: claude → <span style="color:var(--accent4)">compile ✓</span></div>
+        <div><span style="color:var(--accent3)">Gen 3</span>  xover: claude × gpt → <span style="color:var(--accent4)">fitness 78.2</span></div>
+        <div><span style="color:var(--accent2)">Gen 12</span> mutate: const_7→12 → <span style="color:var(--accent4)">fitness 85.6</span></div>
+        <div><span style="color:var(--pink)">Gen 17</span> mutate: pivot_opt → <span style="color:var(--accent4)">fitness 89.1</span></div>
+        <div><span style="color:var(--gold)">Gen 28</span> xover: evolved × gemini → <span style="color:var(--accent4)">fitness 91.8</span></div>
+        <div><span style="color:var(--accent)">Gen 42</span> elite: <span style="font-weight:700;color:var(--accent4)">fitness 93.7 👑</span></div>
+      </div>
+    </div>
+    <div class="card glass fade-in d2">
+      <div class="section-title"><span>📊</span>Compiler Stats</div>
+      <div class="cost-stats">
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent4)">3.2ms</div><div class="cost-stat-label">Compile Time</div></div>
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent3)">47</div><div class="cost-stat-label">Tokens</div></div>
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent2)">EXEC</div><div class="cost-stat-label">Gate Reached</div></div>
+        <div class="cost-stat"><div class="cost-stat-value" style="color:var(--accent)">0</div><div class="cost-stat-label">Warnings</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ SCRIPTS ═══════ -->
+<script>
+// ── Panel Navigation ────────────────────────────────────────────────────
+function showPanel(name) {
+  document.querySelectorAll('[id^="panel-"]').forEach(p => p.style.display = 'none');
+  const el = document.getElementById('panel-' + name);
+  if (el) el.style.display = 'grid';
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  event.target.closest('.tab').classList.add('active');
+}
+
+// ── Fitness Chart ───────────────────────────────────────────────────────
+const canvas = document.getElementById('fitnessChart');
+const ctx = canvas.getContext('2d');
+function resizeCanvas(){const p=canvas.parentElement;canvas.width=p.clientWidth*devicePixelRatio;canvas.height=p.clientHeight*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0)}
+resizeCanvas();
+
+const gens=[];
+for(let i=0;i<=42;i++){const b=58+37*(1-Math.exp(-i/10));const n=(Math.random()-0.5)*3;gens.push({g:i,champ:Math.min(99,b+n),avg:b+n-7-Math.random()*5,worst:Math.max(25,b+n-18-Math.random()*8)})}
+
+function drawChart(){
+  const w=canvas.width/devicePixelRatio,h=canvas.height/devicePixelRatio;
+  const p={l:48,r:16,t:16,b:36},cw=w-p.l-p.r,ch=h-p.t-p.b;
+  ctx.clearRect(0,0,w,h);
+  // Grid
+  ctx.strokeStyle='rgba(255,255,255,0.03)';ctx.lineWidth=1;
+  for(let y=0;y<=4;y++){const yp=p.t+ch/4*y;ctx.beginPath();ctx.moveTo(p.l,yp);ctx.lineTo(w-p.r,yp);ctx.stroke();
+    ctx.fillStyle='#525a70';ctx.font='9px JetBrains Mono';ctx.textAlign='right';ctx.fillText(String(100-y*25),p.l-6,yp+3)}
+  ctx.textAlign='center';for(let x=0;x<=42;x+=7){ctx.fillText('G'+x,p.l+x/42*cw,h-8)}
+  const xy=(g,v)=>({x:p.l+g/42*cw,y:p.t+ch*(1-v/100)});
+  // Bands
+  ctx.beginPath();gens.forEach((g,i)=>{const pt=xy(g.g,g.worst);i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y)});
+  for(let i=gens.length-1;i>=0;i--){const pt=xy(gens[i].g,gens[i].avg);ctx.lineTo(pt.x,pt.y)}
+  ctx.closePath();ctx.fillStyle='rgba(139,92,246,0.04)';ctx.fill();
+  ctx.beginPath();gens.forEach((g,i)=>{const pt=xy(g.g,g.avg);i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y)});
+  for(let i=gens.length-1;i>=0;i--){const pt=xy(gens[i].g,gens[i].champ);ctx.lineTo(pt.x,pt.y)}
+  ctx.closePath();ctx.fillStyle='rgba(249,115,22,0.06)';ctx.fill();
+  // Avg line
+  ctx.beginPath();ctx.strokeStyle='rgba(139,92,246,0.4)';ctx.lineWidth=1.5;
+  gens.forEach((g,i)=>{const pt=xy(g.g,g.avg);i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y)});ctx.stroke();
+  // Champion line
+  ctx.beginPath();ctx.lineWidth=2.5;const gr=ctx.createLinearGradient(p.l,0,w-p.r,0);
+  gr.addColorStop(0,'#f97316');gr.addColorStop(0.7,'#fbbf24');gr.addColorStop(1,'#22c55e');ctx.strokeStyle=gr;
+  gens.forEach((g,i)=>{const pt=xy(g.g,g.champ);i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y)});ctx.stroke();
+  // Endpoint
+  const last=gens[gens.length-1],ep=xy(last.g,last.champ);
+  ctx.beginPath();ctx.arc(ep.x,ep.y,4,0,Math.PI*2);ctx.fillStyle='#f97316';ctx.fill();
+  ctx.beginPath();ctx.arc(ep.x,ep.y,10,0,Math.PI*2);ctx.fillStyle='rgba(249,115,22,0.15)';ctx.fill();
+  // Legend
+  ctx.font='10px Inter';ctx.textAlign='left';ctx.fillStyle='#f97316';ctx.fillRect(p.l+8,p.t+4,12,2.5);
+  ctx.fillStyle='#c9d1d9';ctx.fillText('Champion',p.l+24,p.t+9);
+  ctx.fillStyle='rgba(139,92,246,0.5)';ctx.fillRect(p.l+100,p.t+4,12,2.5);
+  ctx.fillStyle='#c9d1d9';ctx.fillText('Population',p.l+116,p.t+9);
+}
+drawChart();window.addEventListener('resize',()=>{resizeCanvas();drawChart()});
+
+// ── Generate Log Rows ───────────────────────────────────────────────────
+const logEl=document.getElementById('genLog');
+const provs=['claude','gpt','gemini','deepseek'],muts=['xover_uniform','swap@L4','guard@L2','const_7→12','elite','rename_i→i_v'];
+let rows='';
+for(let i=gens.length-1;i>=Math.max(0,gens.length-10);i--){
+  const g=gens[i],sc=3+~~(Math.random()*47),fl=~~(Math.random()*4);
+  const isC=i===gens.length-1;
+  let origin,pill;if(g.g===0){const p=provs[~~(Math.random()*4)];origin=p;pill='pill-'+p}else{origin='evolved';pill='pill-evolved'}
+  const mut=g.g===0?'—':muts[~~(Math.random()*muts.length)];
+  const div=(0.5+Math.random()*0.5).toFixed(2);
+  const cost='$'+(Math.random()*0.01).toFixed(4);
+  rows+=`<tr class="${isC?'champion-row':''}"><td>${g.g}</td><td>${sc}</td><td>${fl}</td>
+    <td style="font-weight:700;color:${g.champ>90?'var(--accent4)':'var(--text)'}">${g.champ.toFixed(1)}</td>
+    <td><span class="pill ${pill}">${origin}</span></td><td style="color:var(--text3);font-size:10px">${mut}</td>
+    <td>${div}</td><td style="color:var(--text3);font-size:10px">${cost}</td></tr>`;
+}
+logEl.innerHTML=rows;
+
+// ── KPI Animation ───────────────────────────────────────────────────────
+function animKPI(id,target,suffix=''){const el=document.getElementById(id);if(!el)return;let c=0;const s=target/35;
+  const iv=setInterval(()=>{c+=s;if(c>=target){c=target;clearInterval(iv)}
+  el.textContent=typeof target==='number'&&target%1!==0?c.toFixed(1)+suffix:Math.round(c).toLocaleString()+suffix},25)}
+animKPI('k-gen',42);animKPI('k-scored',1847);animKPI('k-fit',93.7);
+</script>
+</body>
+</html>
