@@ -23,24 +23,16 @@ from pathlib import Path
 
 from forge import Arena, ArenaConfig, Challenge, compile_and_run, type_check, lex
 from forge.arena import mock_provider
-from forge.providers import openrouter_provider, MODELS, test_provider, chat, multi_agent_research, consensus, auto_route
+from forge.providers import openrouter_provider, ollama_provider, MODELS, test_provider, chat, multi_agent_research, consensus, auto_route, call_openrouter
 from forge.budget import get_tracker, BudgetConfig
+from forge.factory import build as factory_build, ARTIFACT_TYPES
+from forge.marketplace import get_marketplace
 
 
 BANNER = r"""
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   ██████╗ ██╗  ██╗███████╗    ███████╗ ██████╗ ██████╗  ██╗ ║
-║   ╚═══██╗██║  ██║██╔════╝    ██╔════╝██╔═══██╗██╔══██╗██╔╝ ║
-║    ╔══██║███████║█████╗      █████╗  ██║   ██║██████╔╝██║  ║
-║    ║  ██║██╔══██║██╔══╝      ██╔══╝  ██║   ██║██╔══██╗██║  ║
-║    ╚████║██║  ██║███████╗    ██║     ╚██████╔╝██║  ██║╚██╗ ║
-║     ╚═══╝╚═╝  ╚═╝╚══════╝    ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═╝║
-║                                                              ║
-║   Multi-Agent Code Evolution Platform                        ║
-║   Powered by Vitalis JIT Compiler × OpenRouter LLMs          ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
+==============================================================
+   THE FORGE - Multi-Agent Code Evolution Platform
+==============================================================
 """
 
 
@@ -81,7 +73,8 @@ def cmd_arena(args):
     # Register REAL providers
     for name in model_names:
         print(f"   Registering: {name} → {MODELS[name]}")
-        arena.register_provider(name, openrouter_provider(name))
+        provider_fn = ollama_provider(name) if name.endswith("-local") else openrouter_provider(name)
+        arena.register_provider(name, provider_fn)
 
     print()
     start = time.time()
@@ -155,7 +148,7 @@ def cmd_test_providers(args):
         print(f"  🤖 {name} ({model_id})")
 
         try:
-            provider = openrouter_provider(name)
+            provider = ollama_provider(name) if name.endswith("-local") else openrouter_provider(name)
             t0 = time.time()
             source = provider(
                 "Write a function that adds two integers",
@@ -413,6 +406,139 @@ def cmd_budget(args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BUILD — Agent Factory
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cmd_build(args):
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    result = factory_build(
+        description=args.description,
+        artifact_type=args.type,
+        models=models,
+        extra_context=getattr(args, "context", ""),
+        score=not getattr(args, "no_score", False),
+    )
+    if result.winner:
+        print(f"\n  Winner source saved to: {result.output_path}")
+        print(f"\n  --- WINNER CODE (truncated) ---")
+        src = result.winner.source
+        lines = src.split("\n")
+        print("\n".join(lines[:60]))
+        if len(lines) > 60:
+            print(f"  ... ({len(lines)-60} more lines) — see {result.output_path}")
+
+    # Print budget summary
+    tracker = get_tracker()
+    print(f"\n  💰 Factory cost: ${result.total_cost:.4f} | Tokens: {result.total_tokens:,}")
+    print(f"  💼 Session total: ${tracker.total_cost:.4f} remaining ${tracker.remaining_budget:.2f}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORCHESTRATE — Master LLM Planner -> Local SLM Solver
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cmd_orchestrate(args):
+    """Use a Master LLM to design a challenge, then let local SLMs solve it."""
+    print(BANNER)
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        print("❌ OPENROUTER_API_KEY not set for orchestrator")
+        sys.exit(1)
+
+    print(f"🧠 Master Orchestrator: Planning challenge...")
+    print(f"   Task: {args.task}")
+    print(f"   Generating challenge via Claude...")
+
+    prompt = (
+        "You are the Master Orchestrator for The Forge. "
+        "The user will describe a coding task to solve in the Vitalis `.sl` language. "
+        "You must output ONLY valid JSON representing a `Challenge` object. "
+        "Do NOT output markdown fences, ONLY JSON.\n\n"
+        "Format:\n"
+        "{\n"
+        '  "name": "Challenge Name",\n'
+        '  "description": "Full problem description",\n'
+        '  "function_signature": "fn solve(...) -> ...",\n'
+        '  "difficulty": 5,\n'
+        '  "test_cases": [{"call": "solve(...)", "expected": "result"}]\n'
+        "}\n\n"
+        f"USER TASK: {args.task}"
+    )
+
+    try:
+        content, _ = call_openrouter(
+            MODELS["claude"],
+            [{"role": "user", "content": prompt}],
+            max_tokens=1500,
+            purpose="orchestrate"
+        )
+        content = content.replace("```json", "").replace("```", "").strip()
+        data = json.loads(content)
+        # Verify JSON
+        challenge = Challenge(
+            name=data.get("name", "Generated Challenge"),
+            description=data.get("description", ""),
+            function_signature=data.get("function_signature", "fn main() -> i64"),
+            test_cases=data.get("test_cases", []),
+            difficulty=data.get("difficulty", 5)
+        )
+        print(f"✅ Challenge created: {challenge.name}")
+        print(f"   Running Arena with local SLMs...\n")
+    except Exception as e:
+        print(f"❌ Failed to orchestrate challenge: {e}")
+        return
+
+    arena = Arena(config=ArenaConfig(
+        max_generations=args.generations,
+        population_size=args.population,
+        verbose=True,
+    ))
+
+    # Master orchestrator deploys SLM workers (default: qwen-local)
+    model_names = [m.strip() for m in args.models.split(",")]
+    for name in model_names:
+        provider_fn = ollama_provider(name) if name.endswith("-local") else openrouter_provider(name)
+        arena.register_provider(name, provider_fn)
+
+    tournament = arena.run(challenge)
+    _save_results(tournament, challenge)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARKET — Marketplace
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cmd_market(args):
+    mp = get_marketplace()
+    cmd = getattr(args, "market_cmd", None)
+
+    if cmd == "search" or cmd is None:
+        query = getattr(args, "query", "")
+        kind = getattr(args, "kind", "")
+        results = mp.search(query=query, kind=kind)
+        if not results:
+            print("  No items found.")
+            return
+        print(f"\n  Marketplace — {len(results)} result(s):\n")
+        for e in results:
+            fitness_str = f"fitness:{e.fitness:.1f}" if e.fitness > 0 else ""
+            print(f"  [{e.kind:8s}] {e.id:20s} | {e.name:30s} | {fitness_str:12s} | {e.description[:50]}")
+
+    elif cmd == "list":
+        items = mp.list_all()
+        print(f"\n  Marketplace — {len(items)} items:\n")
+        for e in items:
+            print(f"  [{e.kind:8s}] {e.id:20s}  {e.name}")
+        print(f"\n  {mp.summary()}")
+
+    elif cmd == "compare":
+        print(mp.compare(args.id_a, args.id_b))
+
+    else:
+        print("  Usage: forge market [search|list|compare] ...")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -465,11 +591,44 @@ def main():
     p_check = sub.add_parser("check", help="Type-check .sl code")
     p_check.add_argument("source", help="Source code or path to .sl file")
 
+    # build (Agent Factory)
+    p_build = sub.add_parser("build", help="🏭 Agent Factory: build any artifact from description")
+    p_build.add_argument("description", help="What to build (natural language)")
+    p_build.add_argument("--type", "-t", default="auto",
+                         choices=list(ARTIFACT_TYPES.keys()) + ["auto"],
+                         help="Artifact type (default: auto-detect)")
+    p_build.add_argument("--models", "-m", default="claude,gpt,gemini,deepseek",
+                         help="Comma-separated model list")
+    p_build.add_argument("--context", "-c", default="",
+                         help="Additional context or constraints")
+    p_build.add_argument("--no-score", action="store_true",
+                         help="Skip LLM scoring (faster, cheaper)")
+
+    # orchestrate
+    p_orchestrate = sub.add_parser("orchestrate", help="Master Planner dictates challenge, SLMs solve")
+    p_orchestrate.add_argument("task", help="Natural language description of the coding task")
+    p_orchestrate.add_argument("--models", "-m", default="qwen-local", help="Worker models (comma-separated)")
+    p_orchestrate.add_argument("--generations", "-g", type=int, default=5, help="Max generations")
+    p_orchestrate.add_argument("--population", "-p", type=int, default=8, help="Population size")
+
+    # market
+    p_market = sub.add_parser("market", help="🏪 Skill & Artifact Marketplace")
+    market_sub = p_market.add_subparsers(dest="market_cmd")
+    ms_search = market_sub.add_parser("search", help="Search marketplace")
+    ms_search.add_argument("query", nargs="?", default="", help="Search term")
+    ms_search.add_argument("--kind", choices=["skill", "artifact", ""], default="")
+    market_sub.add_parser("list", help="List all marketplace items")
+    ms_compare = market_sub.add_parser("compare", help="Compare two items")
+    ms_compare.add_argument("id_a")
+    ms_compare.add_argument("id_b")
+
     args = parser.parse_args()
     dispatch = {
         "arena": cmd_arena, "chat": cmd_chat, "research": cmd_research,
         "consensus": cmd_consensus, "budget": cmd_budget, "demo": cmd_demo,
-        "test-providers": cmd_test_providers, "compile": cmd_compile, "check": cmd_check,
+        "test-providers": cmd_test_providers, "compile": cmd_compile,
+        "check": cmd_check, "build": cmd_build, "market": cmd_market,
+        "orchestrate": cmd_orchestrate,
     }
     fn = dispatch.get(args.command)
     if fn:

@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.env.*
+!.env.example
 tools/*.sl
 tools/*.json
 *.egg-info/
@@ -9,3 +11,28 @@ dist/
 build/
 .venv/
 target/
+
+# Output artifacts
+output/
+memory/*.json
+
+# Backup files
+*.bak
+
+# Batman mask (generated files)
+batman_mask*
+repair_mask.py
+preview_mask.py
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log

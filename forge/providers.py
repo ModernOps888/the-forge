@@ -30,21 +30,26 @@ def _get_key() -> str:
 # ── Model Registry ───────────────────────────────────────────────────────────
 
 MODELS = {
-    # Premium tier
-    "claude":     "anthropic/claude-sonnet-4",
-    "gpt":        "openai/gpt-4.1",
-    "gemini":     "google/gemini-2.5-flash",
+    # Elite tier
+    "claude-opus": "anthropic/claude-opus-4.7",
+    # Premium tier (April 2026)
+    "claude":     "anthropic/claude-sonnet-4.6",
+    "gpt":        "openai/gpt-5.4",
+    "gemini":     "google/gemini-2.5-pro",
     "deepseek":   "deepseek/deepseek-chat-v3-0324",
     # Economy aliases
-    "gpt-mini":   "openai/gpt-4.1-mini",
-    "gpt-nano":   "openai/gpt-4.1-nano",
-    "gemini-lite": "google/gemini-2.5-flash-lite",
+    "gpt-mini":   "openai/gpt-5.4-mini",
+    "gpt-nano":   "openai/gpt-5.4-nano",
+    "gemini-lite": "google/gemini-2.5-flash",
+    # Local SLM (runs on GPU via Ollama)
+    "qwen-local": "qwen2.5-coder:7b",
 }
 
 MODEL_TIERS = {
-    "cheap":   ["gemini", "deepseek", "gpt-nano", "gemini-lite"],
+    "cheap":   ["gemini", "deepseek", "gpt-nano", "gemini-lite", "qwen-local"],
     "mid":     ["gpt-mini"],
     "premium": ["claude", "gpt"],
+    "elite":   ["claude-opus"],
 }
 
 
@@ -83,8 +88,129 @@ Include: key concepts, trade-offs, best practices, and concrete recommendations.
 Be thorough but organized with clear sections.
 """
 
+COWORK_SYSTEM = """You are an elite, autonomous AI Desktop Assistant (a "Claw" agent) wired natively into the user's Windows OS via The Forge Native Bridge.
+You are collaborating with the user in a spatial sandbox environment.
+
+CRITICAL CAPABILITY:
+You possess the power to actively execute scripts on the host machine to solve the user's request flawlessly.
+If you need to search files, open directories, write scripts, or inspect the environment, you MUST output your command wrapped exactly in `<execute_powershell>...</execute_powershell>`.
+When you do this, I will intercept the command, execute it natively, and reply to you with the `stdout` terminal output so you can read the results.
+
+EXAMPLE:
+User: "Find infinity.png for me"
+You: `<execute_powershell>Get-ChildItem -Path C:\\ -Filter infinity.png -Recurse -ErrorAction SilentlyContinue | Select-Object FullName</execute_powershell>`
+System: `stdout: C:\\forge-seo\\assets\\infinity.png`
+You: "I found your file! It is located at..."
+
+RULES:
+1. ONLY use `<execute_powershell>...</execute_powershell>`. Do not use markdown backticks when you actually want to execute it.
+2. The user will not see the `<execute_powershell>` blocks; they only see your final conversational text and any markdown artifacts you generate.
+3. If you write code that should be pinned to the Workspace Canvas, output it in standard standard ` ```python ` blocks as usual.
+4. Run commands sequentially if needed. I will keep feeding you the `stdout` until you provide your final conversational answer without an `<execute_powershell>` tag.
+5. NEVER attempt to launch interactive shells, browsers, VS Code, or isolated `antigravity.cmd` scripts. 
+6. To send a message, instruction, or data payload natively to the Antigravity system, you MUST output your message wrapped in exactly `<send_antigravity>...</send_antigravity>`. I will intercept this and drop it directly into the native JSON inbox directory that Antigravity is actively monitoring.
+"""
+
 
 # ── Core API Call (with full telemetry) ──────────────────────────────────────
+
+def _is_local_model(provider_name: str) -> bool:
+    """Check if a model name refers to a local Ollama model."""
+    return provider_name.endswith("-local")
+
+
+def call_ollama_chat(
+    model_id: str,
+    messages: list[dict],
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "chat",
+) -> tuple[str, dict]:
+    """
+    Call local Ollama API for chat/research with the same trace contract
+    as call_openrouter. Cost is always $0 for local models.
+    """
+    tracker = get_tracker()
+
+    payload = json.dumps({
+        "model": model_id,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature, "num_ctx": 8192, "num_predict": max_tokens},
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "http://localhost:11434/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            latency_ms = (time.time() - t0) * 1000
+    except Exception as e:
+        raise RuntimeError(f"Ollama local error ({model_id}): {e}")
+
+    content = data["message"]["content"]
+
+    # Ollama returns eval_count / prompt_eval_count when available
+    in_tok = data.get("prompt_eval_count", estimate_tokens(" ".join(m.get("content", "") for m in messages)))
+    out_tok = data.get("eval_count", estimate_tokens(content))
+
+    prompt_text = " ".join(m.get("content", "") for m in messages)
+    trace = RequestTrace(
+        timestamp=time.time(),
+        model_id=model_id,
+        provider_name=provider_name or "qwen-local",
+        purpose=purpose,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        total_tokens=in_tok + out_tok,
+        cost_usd=0.0,
+        api_latency_ms=latency_ms,
+        prompt_chars=len(prompt_text),
+        response_chars=len(content),
+    )
+    tracker.record(trace)
+
+    return content, {
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "cost_usd": 0.0,
+        "latency_ms": latency_ms,
+    }
+
+
+def call_model(
+    model_id: str,
+    messages: list[dict],
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """
+    Unified entry point: routes to Ollama for local models, OpenRouter otherwise.
+    """
+    if _is_local_model(provider_name):
+        return call_ollama_chat(
+            model_id, messages,
+            max_tokens=max_tokens, temperature=temperature,
+            provider_name=provider_name, purpose=purpose,
+        )
+    return call_openrouter(
+        model_id, messages,
+        max_tokens=max_tokens, temperature=temperature,
+        provider_name=provider_name, purpose=purpose,
+        generation=generation, submission_id=submission_id,
+    )
+
 
 def call_openrouter(
     model_id: str,
@@ -203,8 +329,56 @@ def openrouter_provider(model_name: str):
     return generate
 
 
+def ollama_provider(model_name: str):
+    """Create a Forge-compatible local provider hitting Ollama API."""
+    model_id = MODELS.get(model_name, model_name)
+
+    def generate(description: str, function_signature: str) -> str:
+        prompt = (
+            f"Write a Vitalis .sl function.\n\n"
+            f"TASK: {description}\n\n"
+            f"SIGNATURE: {function_signature}\n\n"
+            f"Write the complete function implementation. "
+            f"Then add a main() function that tests it and returns an i64 result.\n"
+            f"Return ONLY the code, no explanation."
+        )
+        payload = json.dumps({
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": CODE_SYSTEM},
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False,
+            "options": {"temperature": 0.7, "num_ctx": 8192}
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "http://localhost:11434/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            content = data["message"]["content"]
+        except Exception as e:
+            raise RuntimeError(f"Ollama local error ({model_id}): {e}")
+
+        return _clean_code(content)
+
+    return generate
+
+
 def make_all_providers() -> dict[str, object]:
-    return {name: openrouter_provider(name) for name in MODELS}
+    providers = {}
+    for name in MODELS:
+        if name.endswith("-local"):
+            providers[name] = ollama_provider(name)
+        else:
+            providers[name] = openrouter_provider(name)
+    return providers
 
 
 # ── Multi-Agent Chat ──────────────────────────────────────────────────────────
@@ -220,7 +394,7 @@ def chat(query: str, model_name: str = "gemini", history: list[dict] | None = No
         messages.extend(history)
     messages.append({"role": "user", "content": query})
 
-    content, usage = call_openrouter(
+    content, usage = call_model(
         model_id, messages,
         max_tokens=2048, temperature=0.5,
         provider_name=model_name, purpose="chat",
@@ -243,7 +417,7 @@ def multi_agent_research(query: str, models: list[str] | None = None) -> dict[st
             {"role": "user", "content": query},
         ]
         try:
-            content, usage = call_openrouter(
+            content, usage = call_model(
                 model_id, messages,
                 max_tokens=2048, temperature=0.4,
                 provider_name=name, purpose="research",
@@ -275,12 +449,12 @@ def consensus(query: str, models: list[str] | None = None) -> dict:
         "Note where models agree and where they diverge. Be precise."
     )
 
-    synth_model = MODELS.get("gemini", "google/gemini-2.5-flash")  # cheapest for synthesis
+    synth_model = MODELS.get("gemini", "google/gemini-2.5-pro")  # used for synthesis
     messages = [
         {"role": "system", "content": "You are a synthesis agent. Merge multiple AI responses into one authoritative answer."},
         {"role": "user", "content": synthesis_prompt},
     ]
-    merged, _ = call_openrouter(
+    merged, _ = call_model(
         synth_model, messages,
         max_tokens=2048, temperature=0.3,
         provider_name="gemini", purpose="synthesis",
@@ -310,11 +484,11 @@ def auto_route(query: str, complexity: str = "auto") -> str:
             complexity = "simple"
 
     if complexity == "simple":
-        model = "gemini"      # $0.15/M input — cheapest
+        model = "gemini"      # cheapest cloud model
     elif complexity == "medium":
-        model = "gpt"         # $0.40/M input — mid-tier
+        model = "gpt-mini"    # mid-tier
     else:
-        model = "claude"      # $3.00/M input — premium
+        model = "claude"      # premium
 
     return chat(query, model_name=model)
 

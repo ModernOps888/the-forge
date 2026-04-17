@@ -189,7 +189,11 @@ def _cli_bench(source: str, runs: int, tpr: float) -> list[float]:
 # ── Public Compiler API ───────────────────────────────────────────────────────
 
 def compile_and_run(source_code: str, timeout_seconds: float = 30.0) -> CompilationResult:
-    """Compile + JIT-execute .sl source. FFI (<5ms) or CLI fallback (~400ms)."""
+    """Compile + JIT-execute .sl source. FFI (<5ms) or CLI fallback (~400ms).
+    Safety: Force CLI isolation by default to prevent Rust DLL panics from crashing the daemon.
+    """
+    if os.getenv("VITALIS_ISOLATED", "1") == "1":
+        return _cli_run(source_code, timeout_seconds)
     return _ffi_run(source_code, timeout_seconds) if _ensure_ffi() else _cli_run(source_code, timeout_seconds)
 
 

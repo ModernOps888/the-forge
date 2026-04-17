@@ -26,10 +26,19 @@ from . import compiler as _c     # hotpath EMA for trend tracking
 # ── OpenRouter Pricing ($ per 1M tokens) ─────────────────────────────────────
 
 PRICING = {
-    "anthropic/claude-sonnet-4":     {"input": 3.00, "output": 15.00},
-    "openai/gpt-4.1-mini":          {"input": 0.40, "output": 1.60},
-    "google/gemini-2.5-flash":      {"input": 0.15, "output": 0.60},
+    # Elite tier (April 2026)
+    "anthropic/claude-opus-4.7":    {"input": 15.00, "output": 75.00},
+    # Premium tier (April 2026)
+    "anthropic/claude-sonnet-4.6":  {"input": 3.00, "output": 15.00},
+    "openai/gpt-5.4":               {"input": 2.50, "output": 20.00},
+    "google/gemini-2.5-pro":        {"input": 1.25, "output": 10.00},
     "deepseek/deepseek-chat-v3-0324":{"input": 0.27, "output": 1.10},
+    # Economy tier
+    "openai/gpt-5.4-mini":          {"input": 0.40, "output": 1.60},
+    "openai/gpt-5.4-nano":          {"input": 0.10, "output": 0.40},
+    "google/gemini-2.5-flash":      {"input": 0.30, "output": 2.50},
+    # Local SLM (free — runs on local GPU via Ollama)
+    "qwen2.5-coder:7b":             {"input": 0.00, "output": 0.00},
 }
 
 
@@ -274,8 +283,31 @@ class CostTracker:
 # ── Token Estimation ──────────────────────────────────────────────────────────
 
 def estimate_tokens(text: str) -> int:
-    """Quick token estimate (~4 chars per token for English text)."""
-    return max(1, len(text) // 4)
+    """Code-aware token estimator.
+    
+    Plain English averages ~4 chars/token with most BPE tokenizers.
+    Source code (Rust, Python, Vitalis .sl) averages ~3 chars/token because
+    symbols like { } [ ] < > ; : are individual tokens.
+    We detect symbol density and adjust dynamically.
+    """
+    if not text:
+        return 1
+    symbol_count = sum(1 for c in text if c in '{}[]<>;:()=+*/\\|&!@#$%^~`"\'')
+    density = symbol_count / max(len(text), 1)
+    chars_per_token = 3 if density > 0.05 else 4
+    return max(1, len(text) // chars_per_token)
+
+
+def estimate_cost_preview(text: str, model_id: str, direction: str = "input") -> float:
+    """Pre-flight cost estimate before making an API call.
+    
+    Returns estimated cost in USD for the given text at the given model's pricing.
+    Useful for budget guard checks before expensive operations.
+    """
+    tokens = estimate_tokens(text)
+    pricing = PRICING.get(model_id, {"input": 1.0, "output": 3.0})
+    rate = pricing.get(direction, pricing.get("input", 1.0))
+    return (tokens / 1_000_000) * rate
 
 
 # ── Global Singleton ──────────────────────────────────────────────────────────

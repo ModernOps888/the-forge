@@ -181,7 +181,7 @@ class Arena:
 
         tournament = Tournament(
             challenge=challenge,
-            providers=[Provider(n) for n in self.providers],
+            providers=[Provider(n) if n in [p.value for p in Provider] else Provider.LOCAL for n in self.providers],
             max_generations=self.config.max_generations,
             population_size=self.config.population_size,
             elite_count=self.config.elite_count,
@@ -264,16 +264,40 @@ class Arena:
     # ── Private: Seed ──────────────────────────────────────────────────────
 
     def _seed_generation(self, challenge: Challenge) -> Generation:
-        """Generate initial submissions from all registered LLM providers."""
+        """Generate initial submissions from all registered LLM providers with Agentic Reflection."""
         submissions = []
         for pname, pfn in self.providers.items():
             try:
-                source = pfn(challenge.description, challenge.function_signature)
+                if self.config.verbose:
+                    print(f"  🤖 Seeding from {pname}...")
+                    
+                max_reflections = 2
+                feedback = ""
+                source = ""
+                
+                for attempt in range(max_reflections + 1):
+                    prompt_desc = challenge.description
+                    if feedback:
+                        prompt_desc += f"\n\n[COMPILER ERROR from previous attempt]:\n{feedback}\nPlease fix the code."
+                        
+                    source = pfn(prompt_desc, challenge.function_signature)
+                    
+                    # Quick compilation check
+                    result = _c.compile_and_run(source, 5.0)
+                    if result.success:
+                        if self.config.verbose and attempt > 0:
+                            print(f"    ↳ ✅ Fixed via reflection after {attempt} retries.")
+                        break
+                    else:
+                        feedback = f"Failed at gate: {result.gate_reached.value}\nError: {result.error}"
+                        if self.config.verbose and attempt < max_reflections:
+                            print(f"    ↳ ❌ Failed gate {result.gate_reached.value}. Reflecting...")
+
                 fp = code_fingerprint(source)
                 sub = Submission(
                     challenge_id=challenge.id,
                     generation=0,
-                    provider=Provider(pname),
+                    provider=Provider(pname) if pname in [p.value for p in Provider] else Provider.LOCAL,
                     source_code=source,
                     status=SubmissionStatus.PENDING,
                 )

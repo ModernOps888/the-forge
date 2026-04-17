@@ -1,4 +1,4 @@
-"""The Forge — Enterprise Multi-Agent Code Evolution Platform powered by Vitalis."""
+"""The Forge — Enterprise Multi-Agent Agent Factory & Code Evolution Platform."""
 
 from .models import (
     Challenge, Submission, Generation, Tournament,
@@ -12,8 +12,11 @@ from .budget import CostTracker, BudgetConfig, get_tracker
 from .governance import ProvenanceChain, PolicyEngine, get_provenance, get_policy_engine
 from .providers import openrouter_provider, chat, multi_agent_research, consensus, auto_route, MODELS
 from .replay import ReplayConfig, save_replay, load_replay
+from .skills import SkillDNA, certify_from_compilation
+from .marketplace import Marketplace, get_marketplace
+from .factory import build as factory_build, FactoryResult, ARTIFACT_TYPES
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
     # Core
     "Arena", "ArenaConfig",
@@ -33,4 +36,9 @@ __all__ = [
     "openrouter_provider", "chat", "multi_agent_research", "consensus", "auto_route", "MODELS",
     # Replay
     "ReplayConfig", "save_replay", "load_replay",
+    # Skills & Marketplace
+    "SkillDNA", "certify_from_compilation",
+    "Marketplace", "get_marketplace",
+    # Factory
+    "factory_build", "FactoryResult", "ARTIFACT_TYPES",
 ]

@@ -88,21 +88,46 @@ def crossover_single_point(a: str, b: str) -> str:
     return "\n".join(la[:bs_a] + body_a[:pt_a] + body_b[pt_b:])
 
 
-def crossover_two_point(a: str, b: str) -> str:
-    """Two-point crossover: swap a middle segment from B into A."""
+def crossover_ast_aware(a: str, b: str) -> str:
+    """
+    AST-aware crossover: swaps entire logical brace-depth blocks between A and B
+    to prevent syntax collisions compared to raw multi-point cuts.
+    """
     la = a.strip().split("\n")
     lb = b.strip().split("\n")
     bs_a = _body_start(la)
     bs_b = _body_start(lb)
     body_a, body_b = la[bs_a:], lb[bs_b:]
-    if len(body_a) < 3 or len(body_b) < 3:
+    
+    if len(body_a) < 4 or len(body_b) < 4:
         return crossover_uniform(a, b)
-    p1 = random.randint(1, len(body_a) - 2)
-    p2 = random.randint(p1 + 1, len(body_a) - 1)
-    q1 = random.randint(0, max(0, len(body_b) - (p2 - p1) - 1))
-    segment = body_b[q1: q1 + (p2 - p1)]
-    child = body_a[:p1] + segment + body_a[p2:]
-    return "\n".join(la[:bs_a] + child)
+        
+    def get_blocks(lines):
+        blocks = []
+        depth = 0
+        start = -1
+        for i, line in enumerate(lines):
+            if '{' in line:
+                if depth == 0: start = i
+                depth += 1
+            if '}' in line:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    blocks.append((start, i))
+                    start = -1
+        return blocks
+
+    blocks_a = get_blocks(body_a)
+    blocks_b = get_blocks(body_b)
+    
+    if not blocks_a or not blocks_b:
+        return crossover_single_point(a, b)
+        
+    ba = random.choice(blocks_a)
+    bb = random.choice(blocks_b)
+    
+    child_body = body_a[:ba[0]] + body_b[bb[0]:bb[1]+1] + body_a[ba[1]+1:]
+    return "\n".join(la[:bs_a] + child_body)
 
 
 # ── Mutation Operators ────────────────────────────────────────────────────────
@@ -301,8 +326,8 @@ def evolve_generation(
         # 3. Crossover
         if random.random() < config.crossover_rate and pa.id != pb.id:
             op = random.choices(
-                [crossover_uniform, crossover_single_point, crossover_two_point],
-                weights=[0.5, 0.3, 0.2]
+                [crossover_uniform, crossover_single_point, crossover_ast_aware],
+                weights=[0.4, 0.2, 0.4]
             )[0]
             child_code = op(pa.source_code, pb.source_code)
             mutations_applied.append(f"xover_{op.__name__.split('_')[1]}")
@@ -380,8 +405,7 @@ def _ngram_vector(source: str, n: int = 3, dim: int = 64) -> list[float]:
     src = source.replace(" ", "").replace("\n", "")
     for i in range(len(src) - n + 1):
         gram = src[i:i + n]
-        h = int(hashlib.md5(gram.encode()).hexdigest(), 16)
-        vec[h % dim] += 1.0
+        vec[hash(gram) % dim] += 1.0
     # L2 normalize
     mag = math.sqrt(sum(x * x for x in vec)) or 1.0
     return [x / mag for x in vec]
