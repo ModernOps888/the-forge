@@ -7,7 +7,8 @@
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Vitalis](https://img.shields.io/badge/Powered_by-Vitalis_JIT-b7410e?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/ModernOps888/vitalis)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
-[![OpenRouter](https://img.shields.io/badge/LLMs_via-OpenRouter-6366f1?style=for-the-badge)](https://openrouter.ai)
+[![Multi-Vendor](https://img.shields.io/badge/LLMs-Multi_Vendor-6366f1?style=for-the-badge)](https://openrouter.ai)
+[![Cross-Platform](https://img.shields.io/badge/Platform-Win_Linux_Mac-22c55e?style=for-the-badge)](#-compute--hardware)
 
 **Multiple LLMs compete to solve coding challenges.<br>
 The Vitalis compiler is the impartial judge.<br>
@@ -16,6 +17,10 @@ Evolution breeds the winners into code no single model could write.**
 <br>
 
 > **`Claude's elegance × GPT's brute force × Gemini's lateral thinking → native compiled code`**
+
+<br>
+
+![The Forge Dashboard](docs/screenshots/forge-dashboard.png)
 
 </div>
 
@@ -74,7 +79,8 @@ The result: code that's measurably better than any single model wrote.
 | Tool | Version | Purpose |
 |------|---------|---------|
 | **Python** | 3.12+ | Orchestration engine |
-| **OpenRouter API Key** | — | Access to Claude, GPT, Gemini, DeepSeek |
+| **API Key** | Any vendor | At least one: OpenRouter, Anthropic, OpenAI, Google, or DeepSeek |
+| **Ollama** *(optional)* | Latest | Local GPU/CPU inference (qwen, llama, etc.) |
 | **Vitalis** *(optional)* | v60 | JIT compilation backend (falls back to Python) |
 
 ### Install & Run
@@ -87,9 +93,13 @@ cd the-forge
 # Install dependencies (minimal — mostly stdlib)
 pip install -r requirements.txt
 
-# Set your API key
+# Set at least one API key (see .env.example for all options)
 # Windows PowerShell:
 $env:OPENROUTER_API_KEY = "sk-or-v1-your-key-here"
+# Or use direct vendor keys for lower latency:
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+$env:OPENAI_API_KEY = "sk-..."
+
 # Linux/macOS:
 export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
 
@@ -97,7 +107,7 @@ export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
 python forge_server.py
 
 # Open dashboard
-# → http://localhost:5000
+# → http://localhost:8777
 ```
 
 ### CLI Usage
@@ -381,20 +391,29 @@ tracker = get_tracker(BudgetConfig(max_budget_usd=50.0))
 
 ## 🖥️ Live Dashboard
 
-The Forge ships with a full interactive dashboard at `http://localhost:5000`:
+The Forge ships with a full interactive dashboard at `http://localhost:8777`:
+
+![Chat View with Model Badges](docs/screenshots/forge-chat-view.png)
 
 | Tab | Features |
 |-----|----------|
-| **Chat** | Multi-model chat with session history, model selector |
+| **Chat** | Multi-model chat with vendor badges (DIRECT/OPENROUTER/LOCAL) |
+| **Cowork** | Desktop co-work agent with native OS hooks |
 | **Research** | Fan query to multiple models, consensus synthesis |
-| **Factory** | Build artifacts, view leaderboards, deploy |
-| **Orchestrate** | Multi-step complex task execution |
+| **Build** | Agent Factory — 4 models compete, leaderboard scoring |
 | **Compile** | Vitalis .sl code compilation & execution |
-| **Budget** | Real-time cost tracking, provider breakdown |
-| **Provenance** | Audit trail, integrity verification |
-| **Memory** | Working/episodic/semantic memory inspector |
-| **Self-Improve** | Patch Forge source code with AI |
-| **System** | Health, models, marketplace, traces |
+| **Dashboard** | KPIs, Compute & Platform panel, Vendor Routing matrix |
+| **Orchestrate** | Multi-step complex task execution |
+| **Evolve** | Self-improvement engine with fitness gating |
+| **Trace** | Execution traces + Human-in-the-Loop approvals |
+| **Antigravity** | IDE export inbox |
+
+### Dashboard Highlights
+
+- **6 KPI Cards**: Total Cost, Tokens, Requests, Active Vendors, GPU Count, Vitalis Version
+- **Compute & Platform Panel**: Detected GPU (name, VRAM bar), OS badge, CPU cores, RAM, compute mode selector
+- **Vendor Routing Matrix**: Shows which vendors are ACTIVE/INACTIVE with IDE export targets
+- **Real-time telemetry**: CPU%, RAM%, GPU% with VRAM utilization in the top bar
 
 ---
 
@@ -449,21 +468,60 @@ answer = auto_route("Design a payment API")   # → Claude (premium)
 
 ---
 
-## 🔧 Model Registry
+## 🔧 Model Registry & Multi-Vendor Routing
 
-| Name | Model ID | Tier |
-|------|----------|------|
-| `claude` | `anthropic/claude-sonnet-4.6` | Premium |
-| `claude-opus` | `anthropic/claude-opus-4.7` | Elite |
-| `gpt` | `openai/gpt-5.4` | Premium |
-| `gpt-mini` | `openai/gpt-5.4-mini` | Mid |
-| `gpt-nano` | `openai/gpt-5.4-nano` | Economy |
-| `gemini` | `google/gemini-2.5-pro` | Premium |
-| `gemini-lite` | `google/gemini-2.5-flash` | Economy |
-| `deepseek` | `deepseek/deepseek-chat-v3-0324` | Economy |
-| `qwen-local` | `qwen2.5-coder:7b` | Local (Ollama) |
+| Name | Model ID | Tier | Routing |
+|------|----------|------|--------|
+| `claude` | `anthropic/claude-sonnet-4.6` | Premium | Direct → OpenRouter fallback |
+| `claude-opus` | `anthropic/claude-opus-4.7` | Elite | Direct → OpenRouter fallback |
+| `gpt` | `openai/gpt-5.4` | Premium | Direct → OpenRouter fallback |
+| `gpt-mini` | `openai/gpt-5.4-mini` | Mid | Direct → OpenRouter fallback |
+| `gpt-nano` | `openai/gpt-5.4-nano` | Economy | Direct → OpenRouter fallback |
+| `gemini` | `google/gemini-2.5-pro` | Premium | Direct → OpenRouter fallback |
+| `gemini-lite` | `google/gemini-2.5-flash` | Economy | Direct → OpenRouter fallback |
+| `deepseek` | `deepseek/deepseek-chat-v3-0324` | Economy | Direct → OpenRouter fallback |
+| `qwen-local` | `qwen2.5-coder:7b` | Local | Ollama (GPU/CPU/Split) |
 
-All cloud models route through [OpenRouter](https://openrouter.ai). Local models run via [Ollama](https://ollama.com).
+### Smart Routing
+
+The Forge uses a **smart routing** strategy:
+
+1. **Direct vendor key present?** → Call vendor API directly (lowest latency)
+2. **No direct key?** → Fall back to OpenRouter (universal relay)
+3. **Local model?** → Route to Ollama with hardware-aware `num_gpu`
+
+```
+Anthropic key → api.anthropic.com (direct, ~200ms)
+No key         → openrouter.ai/api (relay, ~400ms)
+qwen-local     → localhost:11434 (Ollama, GPU/CPU)
+```
+
+---
+
+## 🖥 Compute & Hardware
+
+The Forge auto-detects available hardware for local inference:
+
+| Platform | GPU Detection | RAM Detection |
+|----------|--------------|---------------|
+| **Windows** | `nvidia-smi` (NVIDIA) | `wmic` / `psutil` |
+| **Linux** | `nvidia-smi` (NVIDIA), `rocm-smi` (AMD) | `psutil` |
+| **macOS** | Apple Silicon (unified memory) | `psutil` |
+
+### Compute Modes (`FORGE_COMPUTE`)
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `auto` | Detect GPU, fallback to CPU | Default — works everywhere |
+| `gpu` | Force all layers on GPU | Dedicated GPU machines |
+| `cpu` | Force CPU-only (`num_gpu=0`) | No GPU, 16GB+ RAM |
+| `split` | Split layers across GPU+CPU | Limited VRAM (4-6GB) |
+
+The dashboard's **Compute & Platform** panel shows detected hardware in real-time:
+- GPU name, VRAM total/free with usage bar
+- Platform badge (🪟 Windows / 🐧 Linux / 🍎 macOS)
+- CPU cores, system RAM with capacity bar
+- Active compute mode selector visualization
 
 ---
 
@@ -537,14 +595,17 @@ TheForge/
 | `POST` | `/api/cowork` | Desktop co-work agent |
 | `POST` | `/api/quick-chat` | Stateless single-shot chat |
 | `POST` | `/api/analyze-file` | AI code review of local file |
-| `POST` | `/api/export` | Export to Antigravity clipboard |
+| `POST` | `/api/export` | Export to IDE bridge (multi-target) |
 | `POST` | `/api/native` | Native OS bridge (explorer/IDE/terminal) |
-| `GET` | `/api/health` | System health check |
-| `GET` | `/api/models` | Available models + pricing |
+| `GET` | `/api/health` | System health + active vendors |
+| `GET` | `/api/models` | Available models + pricing + vendor badges |
 | `GET` | `/api/budget` | Cost & token report |
 | `GET` | `/api/provenance` | Governance audit trail |
 | `GET` | `/api/memory` | Memory system stats |
 | `GET` | `/api/traces` | Execution traces |
+| `GET` | `/api/vendor-health` | Vendor connection status |
+| `GET` | `/api/compute` | Hardware detection (GPUs, CPU, RAM) |
+| `GET` | `/api/ide-targets` | Configured IDE export targets |
 
 ---
 
@@ -554,6 +615,9 @@ TheForge/
 - [x] CLI with demo mode
 - [x] Vitalis JIT integration with native Rust hotpaths
 - [x] Real LLM providers via OpenRouter (Claude, GPT, Gemini, DeepSeek)
+- [x] **Multi-vendor smart routing** (direct Anthropic/OpenAI/Google/DeepSeek + OpenRouter fallback)
+- [x] **Cross-platform compute detection** (NVIDIA, AMD ROCm, Apple Silicon, CPU-only)
+- [x] **IDE-agnostic export bridge** (VS Code, Cursor, Windsurf, Antigravity, clipboard)
 - [x] Budget & cost tracking with EMA spike detection
 - [x] Enterprise governance (provenance chain, policy engine, circuit breaker)
 - [x] Agent Factory (16 artifact types, 8 languages)
@@ -563,9 +627,9 @@ TheForge/
 - [x] Interactive dashboard with 10+ tabs
 - [x] Native desktop bridge (File Explorer, VS Code, PowerShell)
 - [x] Polyglot fitness engine (Python, Rust, Go, TypeScript, etc.)
-- [x] Local model support via Ollama
+- [x] Local model support via Ollama (GPU/CPU/split compute modes)
+- [x] MCP server (11 tools, smart-routed)
 - [ ] SQLite evolution ledger
-- [ ] MCP server for agent tool discovery
 - [ ] AST-level crossover (not line-level)
 - [ ] Property-based fuzz testing via Vitalis
 - [ ] Multi-user collaboration mode

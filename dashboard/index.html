@@ -664,6 +664,21 @@ fn main() -> i64 {
           </div>
         </div>
       </div>
+      <!-- ── Compute & Platform Row (full-width, screenshot-worthy) ── -->
+      <div class="dash-row" style="margin-top:0">
+        <div class="dash-card" style="flex:2">
+          <div class="dash-card-title"><span class="title-dot" style="background:#f97316;color:#f97316"></span>Compute & Platform</div>
+          <div id="dashComputePanel" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:12px">
+            <div style="color:var(--tx3)">Loading hardware info...</div>
+          </div>
+        </div>
+        <div class="dash-card" style="flex:1">
+          <div class="dash-card-title"><span class="title-dot" style="background:#6366f1;color:#6366f1"></span>Vendor Routing</div>
+          <div id="dashVendorMatrix" style="font-size:12px">
+            <div style="color:var(--tx3)">Loading vendor status...</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1622,6 +1637,110 @@ async function refreshDashboard() {
       const ollamaEndpoint = (vendors.ollama && vendors.ollama.endpoint) ? vendors.ollama.endpoint.replace('/api/chat', '/api/tags') : 'http://localhost:11434/api/tags';
       try { const oRes = await fetch(ollamaEndpoint, {signal:AbortSignal.timeout(2000)}); dO.textContent = oRes.ok ? 'Online' : 'Offline'; dO.style.color = oRes.ok ? 'var(--gn)' : 'var(--rd)'; } catch(oe) { dO.textContent = 'Offline'; dO.style.color = 'var(--rd)'; }
     }
+
+    // ── Compute & Platform Panel ──
+    const cpPanel = document.getElementById('dashComputePanel');
+    if (cpPanel) {
+      const gpus = compute.gpus || [];
+      const mode = (compute.resolved_mode || 'auto').toUpperCase();
+      const platform = compute.platform || 'unknown';
+      const platformMap = {win32:'🪟 Windows',linux:'🐧 Linux',darwin:'🍎 macOS'};
+      const platformLabel = platformMap[platform] || platform;
+      
+      let html = '';
+      
+      // Left column: Platform + CPU + RAM
+      html += `<div>`;
+      html += `<div style="margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:6px;font-weight:800">Platform</div>
+        <div style="font-size:18px;font-weight:900;color:var(--cy)">${platformLabel}</div>
+      </div>`;
+      html += `<div style="margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:6px;font-weight:800">CPU</div>
+        <div style="font-size:16px;font-weight:800;color:var(--tx)">${compute.cpu_cores || '?'} cores</div>
+      </div>`;
+      html += `<div style="margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:6px;font-weight:800">System RAM</div>
+        <div style="font-size:16px;font-weight:800;color:${(compute.ram_gb||0)>=16?'var(--gn)':'var(--or)'}">${compute.ram_gb || '?'} GB</div>
+        <div style="margin-top:4px;height:6px;border-radius:3px;background:rgba(255,255,255,0.04);overflow:hidden">
+          <div style="height:100%;width:${Math.min((compute.ram_gb||0)/64*100,100)}%;background:linear-gradient(90deg,var(--gn),var(--cy));border-radius:3px"></div>
+        </div>
+      </div>`;
+      html += `<div>
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:6px;font-weight:800">Compute Mode</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${['AUTO','GPU','CPU','SPLIT'].map(m => `<span style="padding:3px 10px;border-radius:5px;font-size:10px;font-weight:800;letter-spacing:0.5px;${mode===m ? 'background:rgba(249,115,22,0.15);color:#fb923c;border:1px solid rgba(249,115,22,0.3)' : 'background:rgba(255,255,255,0.03);color:var(--tx3);border:1px solid var(--border)'}">${m}</span>`).join('')}
+        </div>
+      </div>`;
+      html += `</div>`;
+      
+      // Right column: GPU cards
+      html += `<div>`;
+      html += `<div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:8px;font-weight:800">GPU Accelerators</div>`;
+      if (gpus.length > 0) {
+        gpus.forEach(g => {
+          const vramUsed = (g.vram_total_mb||0) - (g.vram_free_mb||0);
+          const vramPct = g.vram_total_mb ? Math.round(vramUsed/g.vram_total_mb*100) : 0;
+          const vendorIcon = g.vendor === 'nvidia' ? '💚' : (g.vendor === 'amd' ? '❤️' : (g.vendor === 'apple' ? '🍎' : '🔲'));
+          const vendorBadge = (g.vendor||'unknown').toUpperCase();
+          html += `<div style="background:rgba(34,197,94,0.04);border:1px solid rgba(34,197,94,0.12);border-radius:10px;padding:12px;margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div style="font-weight:900;font-size:13px;color:var(--gn)">${vendorIcon} ${g.name || 'GPU'}</div>
+              <span style="font-size:8px;padding:2px 6px;border-radius:3px;background:rgba(34,197,94,0.1);color:#86efac;border:1px solid rgba(34,197,94,0.15);font-weight:800">${vendorBadge}</span>
+            </div>
+            ${g.vram_total_mb ? `
+            <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--tx2);margin-bottom:4px">
+              <span>VRAM: ${Math.round(g.vram_total_mb/1024*10)/10} GB</span>
+              <span>${g.vram_free_mb ? Math.round(g.vram_free_mb/1024*10)/10 + ' GB free' : ''}</span>
+            </div>
+            <div style="height:8px;border-radius:4px;background:rgba(255,255,255,0.04);overflow:hidden">
+              <div style="height:100%;width:${vramPct}%;background:linear-gradient(90deg,#22c55e,#f97316);border-radius:4px;transition:width 0.5s"></div>
+            </div>` : ''}
+            ${g.driver ? `<div style="font-size:9px;color:var(--tx3);margin-top:6px">Driver: ${g.driver}</div>` : ''}
+          </div>`;
+        });
+      } else {
+        html += `<div style="background:rgba(249,115,22,0.04);border:1px solid rgba(249,115,22,0.12);border-radius:10px;padding:16px;text-align:center">
+          <div style="font-size:24px;margin-bottom:8px">🖥️</div>
+          <div style="font-weight:800;color:var(--or);font-size:12px">CPU-Only Mode</div>
+          <div style="font-size:10px;color:var(--tx3);margin-top:4px">No GPU detected. Local inference runs on CPU.<br>Works with ${compute.ram_gb||'?'}GB RAM (16GB+ recommended)</div>
+        </div>`;
+      }
+      html += `</div>`;
+      cpPanel.innerHTML = html;
+    }
+
+    // ── Vendor Routing Matrix ──
+    const vmPanel = document.getElementById('dashVendorMatrix');
+    if (vmPanel) {
+      const vendorList = ['openrouter','anthropic','openai','google','deepseek','ollama'];
+      const vendorIcons = {openrouter:'🔀',anthropic:'🟤',openai:'🟢',google:'🔵',deepseek:'🟣',ollama:'🦙'};
+      let vmHtml = '';
+      vendorList.forEach(name => {
+        const v = vendors[name];
+        if (!v) return;
+        const active = v.active;
+        const icon = vendorIcons[name] || '●';
+        vmHtml += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:16px">${icon}</span>
+          <span style="font-weight:800;font-size:12px;min-width:80px;color:${active?'var(--tx)':'var(--tx3)'}">${name}</span>
+          <span style="margin-left:auto;font-size:9px;padding:2px 8px;border-radius:4px;font-weight:800;${active?'background:rgba(34,197,94,0.1);color:#86efac;border:1px solid rgba(34,197,94,0.12)':'background:rgba(100,116,139,0.08);color:var(--tx3);border:1px solid var(--border)'}">${active?'● ACTIVE':'○ INACTIVE'}</span>
+        </div>`;
+      });
+      // IDE targets
+      try {
+        const ideRes = await fetch(API+'/api/ide-targets');
+        const ideData = await ideRes.json();
+        if (ideData.targets && ideData.targets.length) {
+          vmHtml += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:8px;font-weight:800">IDE Export Targets</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">${ideData.targets.map(t => `<span style="padding:3px 8px;border-radius:5px;font-size:10px;font-weight:700;background:rgba(99,102,241,0.08);color:#a5b4fc;border:1px solid rgba(99,102,241,0.15)">${t}</span>`).join('')}</div>
+          </div>`;
+        }
+      } catch(ie) {}
+      vmPanel.innerHTML = vmHtml;
+    }
+
   } catch(e) { console.error(e); }
 }
 

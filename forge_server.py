@@ -129,7 +129,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             if path == "/api/health":
                 valid, _ = PROVENANCE.verify_integrity()
                 vendors = get_vendor_status()
-                active_vendors = [k for k, v in vendors.items() if v["active"]]
+                active_vendors = [k for k, v in vendors.items() if not k.startswith('_') and v.get("active")]
                 self._json_response({
                     "status": "ok",
                     "vitalis": _safe_vitalis_version(),
@@ -1852,7 +1852,7 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8777
 
     vendors = get_vendor_status()
-    active_v = [k for k, v in vendors.items() if v["active"]]
+    active_v = [k for k, v in vendors.items() if not k.startswith('_') and v.get("active")]
     ide_targets = os.environ.get("FORGE_IDE_TARGETS", "antigravity,clipboard")
     print(f"""
 ==============================================================
