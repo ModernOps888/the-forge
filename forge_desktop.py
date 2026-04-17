@@ -25,6 +25,29 @@ from pathlib import Path
 FORGE_API = "http://localhost:8777"
 ICON_SIZE = (64, 64)
 
+# IDE process names for detection
+IDE_PROCESSES = {
+    "Code.exe": "VS Code",
+    "Cursor.exe": "Cursor",
+    "Windsurf.exe": "Windsurf",
+    "devenv.exe": "Visual Studio",
+}
+
+def detect_running_ides() -> list[str]:
+    """Scan running processes for known IDE executables."""
+    found = []
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            'tasklist /fo csv /nh', shell=True, text=True, timeout=3
+        )
+        for proc_name, ide_name in IDE_PROCESSES.items():
+            if proc_name.lower() in out.lower():
+                found.append(ide_name)
+    except Exception:
+        pass
+    return found
+
 
 # ── Desktop Notifications ─────────────────────────────────────────────────────
 
@@ -238,6 +261,7 @@ def create_tray_icon():
                 "Forge Health ✅",
                 f"Status: {result['status']}\n"
                 f"Models: {result.get('models', '?')}\n"
+                f"Vendors: {', '.join(result.get('active_vendors', []))}\n"
                 f"Budget: ${result.get('budget_remaining', '?')}\n"
                 f"Vitalis: {result.get('vitalis', '?')}",
             )
@@ -293,12 +317,22 @@ def _quick_chat_dialog():
     tk.Label(root, text="🔥 Quick Chat with Forge AI", font=("Segoe UI", 14, "bold"),
              bg=bg, fg=orange).pack(pady=(12, 6))
 
-    # Model selector
+    # Model selector — dynamically fetch from API
     model_frame = tk.Frame(root, bg=bg)
     model_frame.pack(fill="x", padx=20)
     tk.Label(model_frame, text="Model:", bg=bg, fg=tx, font=font_main).pack(side="left")
     model_var = tk.StringVar(value="gemini")
-    for m in ["gemini", "claude", "deepseek", "qwen-local"]:
+
+    # Fetch live model list from API
+    model_names = ["gemini", "claude", "deepseek", "qwen-local"]  # fallback
+    try:
+        api_models = forge_request("/api/models")
+        if "models" in api_models:
+            model_names = [m["name"] for m in api_models["models"]]
+    except Exception:
+        pass
+
+    for m in model_names:
         tk.Radiobutton(model_frame, text=m, variable=model_var, value=m,
                        bg=bg, fg=tx, selectcolor=card, font=("Segoe UI", 9),
                        activebackground=bg, activeforeground=orange).pack(side="left", padx=4)
@@ -510,7 +544,8 @@ def handle_cli():
             "content": {"response": content, "file_path": file_path},
         })
         if result.get("ok"):
-            notify("Forge", f"📤 Sent {Path(file_path).name} to Antigravity inbox")
+            targets = result.get('delivered_to', ['inbox'])
+            notify("Forge", f"📤 Sent {Path(file_path).name} → {', '.join(targets)}")
         return True
 
     elif cmd == "--register":
@@ -530,7 +565,8 @@ def handle_cli():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("""
+    ides = detect_running_ides()
+    print(f"""
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    THE FORGE — Desktop Integration
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -538,6 +574,7 @@ def main():
    Global Hotkey:   Ctrl+Shift+F
    Context Menus:   Right-click any file
    Notifications:   Windows 10/11 Toast
+   IDEs Detected:   {', '.join(ides) if ides else 'None'}
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     """)
 

@@ -55,7 +55,7 @@ log = logging.getLogger("forge")
 from forge.providers import (
     call_openrouter, call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM, COWORK_SYSTEM,
     _clean_code, CODE_SYSTEM, ollama_provider, openrouter_provider,
-    _is_local_model,
+    _is_local_model, get_vendor_status, _resolve_vendor, detect_compute_hardware,
 )
 from forge.budget import get_tracker, BudgetConfig, RequestTrace, PRICING
 from forge.governance import get_provenance, get_policy_engine, CircuitBreaker
@@ -128,6 +128,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         try:
             if path == "/api/health":
                 valid, _ = PROVENANCE.verify_integrity()
+                vendors = get_vendor_status()
+                active_vendors = [k for k, v in vendors.items() if v["active"]]
                 self._json_response({
                     "status": "ok",
                     "vitalis": _safe_vitalis_version(),
@@ -139,19 +141,37 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                     "uptime_s": round(time.time() - _START_TIME, 1),
                     "artifact_types": len(ARTIFACT_TYPES),
                     "marketplace_items": len(get_marketplace().list_all()),
+                    "active_vendors": active_vendors,
                 })
 
             elif path == "/api/models":
                 models_out = []
                 for name, model_id in MODELS.items():
                     pricing = PRICING.get(model_id, {"input": 0, "output": 0})
+                    # Determine vendor routing for this model
+                    try:
+                        vendor, _ = _resolve_vendor(model_id)
+                    except RuntimeError:
+                        vendor = "none"
                     models_out.append({
                         "name": name,
                         "model_id": model_id,
                         "input_cost_per_m": pricing.get("input", 0),
                         "output_cost_per_m": pricing.get("output", 0),
+                        "vendor": vendor,
                     })
                 self._json_response({"models": models_out})
+
+            elif path == "/api/vendor-health":
+                self._json_response(get_vendor_status())
+
+            elif path == "/api/ide-targets":
+                targets = [t.strip() for t in os.environ.get("FORGE_IDE_TARGETS", "antigravity,clipboard").split(",") if t.strip()]
+                self._json_response({"targets": targets})
+
+            elif path == "/api/compute":
+                hw = detect_compute_hardware()
+                self._json_response(hw)
 
             elif path == "/api/budget":
                 provider_costs = TRACKER.cost_per_provider()
@@ -681,8 +701,15 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             self._json_response({"error": str(e)}, 500)
 
     def _api_export(self, body: dict):
-        """Export a Forge payload (research, build, chat, orchestrate) to the
-        Antigravity brain clipboard. Replaces the rigid JSON inbox with instant sync."""
+        """IDE-Agnostic Export Bridge.
+        
+        Dispatches Forge payloads to all configured IDE targets:
+          - antigravity: JSON file → ~/.gemini/antigravity/brain/forge-inbox/
+          - vscode:      JSON file → workspace .vscode/forge-export.json
+          - cursor:      JSON file → workspace .cursor/forge-context/
+          - windsurf:    JSON file → workspace .windsurf/forge-context/
+          - clipboard:   PowerShell Set-Clipboard (universal fallback)
+        """
         import subprocess
         
         payload_type = body.get("type", "unknown")
@@ -690,7 +717,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         content     = body.get("content", {})
         source_model = body.get("model", "")
 
-        # Build a beautiful, semantic chunk of Markdown optimized for Gemini input
+        # Build Markdown for clipboard
         md = f"**[FORGE NATIVE EXPORT: {payload_type.upper()}]**\n\n"
         md += f"**Title**: {title}\n"
         md += f"**Source Model**: {source_model}\n\n"
@@ -707,48 +734,66 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         md += "\n*Sent from The Forge Native Desktop Bridge.*"
 
         try:
-            import json
+            import json as _json
             from datetime import datetime
             from pathlib import Path
-            
-            # --- Native JSON Bridge ---
-            inbox_dir = Path.home() / ".gemini" / "antigravity" / "brain" / "forge-inbox"
-            inbox_dir.mkdir(parents=True, exist_ok=True)
+
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_title = "".join([c if c.isalnum() else "_" for c in title[:30]])
             fname = f"{ts}_{payload_type}_{source_model}_{safe_title}.json"
-            
-            payload = {
+            ide_payload = {
                 "exported_at": datetime.now().isoformat(),
                 "type": payload_type,
                 "model": source_model,
                 "title": title,
                 "content": content
             }
-            (inbox_dir / fname).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            
-            # --- Clipboard Fallback ---
-            subprocess.run(["powershell", "-command", "Set-Clipboard", "-Value", "$input"], input=md.encode('utf-8'))
-            
-            # --- AGGRESSIVE NATIVE IDE UX INJECTION ---
-            try:
-                from pywinauto import Desktop
-                from pywinauto.keyboard import send_keys
-                import time
-                
-                for w in Desktop(backend="uia").windows():
-                    if "Antigravity" in w.window_text() or "Visual Studio Code" in w.window_text() or "Cursor" in w.window_text():
-                        w.set_focus()
-                        time.sleep(0.3)
-                        send_keys("^v")
-                        time.sleep(0.1)
-                        send_keys("{ENTER}")
-                        break
-            except Exception as e:
-                print(f"[Bridge Warn] GUI Activation failed: {e}")
-            
-            PROVENANCE.record("export_to_clipboard_and_inbox", title, f"type:{payload_type}", {"status": "clipboard_and_inbox_synced"})
-            self._json_response({"ok": True, "title": title, "file": fname})
+            ide_json = _json.dumps(ide_payload, indent=2)
+
+            targets = [t.strip() for t in os.environ.get("FORGE_IDE_TARGETS", "antigravity,clipboard").split(",") if t.strip()]
+            delivered = []
+
+            for target in targets:
+                try:
+                    if target == "antigravity":
+                        inbox_dir = Path.home() / ".gemini" / "antigravity" / "brain" / "forge-inbox"
+                        inbox_dir.mkdir(parents=True, exist_ok=True)
+                        (inbox_dir / fname).write_text(ide_json, encoding="utf-8")
+                        delivered.append("antigravity")
+
+                    elif target == "vscode":
+                        vsc_dir = Path.cwd() / ".vscode"
+                        vsc_dir.mkdir(parents=True, exist_ok=True)
+                        (vsc_dir / "forge-export.json").write_text(ide_json, encoding="utf-8")
+                        delivered.append("vscode")
+
+                    elif target == "cursor":
+                        cur_dir = Path.cwd() / ".cursor" / "forge-context"
+                        cur_dir.mkdir(parents=True, exist_ok=True)
+                        (cur_dir / fname).write_text(ide_json, encoding="utf-8")
+                        delivered.append("cursor")
+
+                    elif target == "windsurf":
+                        ws_dir = Path.cwd() / ".windsurf" / "forge-context"
+                        ws_dir.mkdir(parents=True, exist_ok=True)
+                        (ws_dir / fname).write_text(ide_json, encoding="utf-8")
+                        delivered.append("windsurf")
+
+                    elif target == "clipboard":
+                        subprocess.run(
+                            ["powershell", "-command", "Set-Clipboard", "-Value", "$input"],
+                            input=md.encode('utf-8'), timeout=5,
+                        )
+                        delivered.append("clipboard")
+
+                except Exception as e:
+                    print(f"  [Export] Target '{target}' failed: {e}")
+
+            PROVENANCE.record("export_ide_bridge", title, f"type:{payload_type}", {
+                "targets": delivered, "file": fname,
+            })
+            self._json_response({"ok": True, "title": title, "file": fname, "delivered_to": delivered})
+
         except Exception as e:
             self._json_response({"error": str(e)}, 500)
 
@@ -1806,16 +1851,21 @@ def _safe_vitalis_version() -> str:
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8777
 
+    vendors = get_vendor_status()
+    active_v = [k for k, v in vendors.items() if v["active"]]
+    ide_targets = os.environ.get("FORGE_IDE_TARGETS", "antigravity,clipboard")
     print(f"""
 ==============================================================
-  THE FORGE — Live API Server                                 
+  THE FORGE — Multi-Vendor Live API Server                     
   http://localhost:{port}                                       
 ==============================================================
   Dashboard:  http://localhost:{port}/                           
   API:        http://localhost:{port}/api/health                 
-  Models:     {len(MODELS)} available via OpenRouter                      
+  Models:     {len(MODELS)} registered                                    
+  Vendors:    {', '.join(active_v) or 'none configured'}                      
   Budget:     ${TRACKER.budget.max_budget_usd:.2f} max                                      
   Vitalis:    {_safe_vitalis_version():<20s}                          
+  IDE Bridge: {ide_targets}                          
   Tracer:     Active (Threading Mode)
 ==============================================================
     """)

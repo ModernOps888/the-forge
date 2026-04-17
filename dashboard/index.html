@@ -145,7 +145,7 @@ header{position:relative;z-index:10;display:flex;align-items:center;justify-cont
 .rr-consensus{background:rgba(139,92,246,0.03);border-color:rgba(139,92,246,0.12);box-shadow:var(--glow-vi)}
 .rr-consensus .rr-model{color:var(--vi)}
 
-/* ── Antigravity Export Button ── */
+/* ── IDE Export Button ── */
 .ag-export-btn{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:8px;font-size:9px;font-weight:700;cursor:pointer;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.06);color:#a5b4fc;transition:all 0.2s;letter-spacing:0.4px;white-space:nowrap;margin-top:8px}
 .ag-export-btn:hover{background:rgba(99,102,241,0.14);border-color:rgba(99,102,241,0.4);color:#c7d2fe;transform:translateY(-1px)}
 .ag-export-btn.sent{background:rgba(34,197,94,0.08);border-color:rgba(34,197,94,0.25);color:#86efac;pointer-events:none}
@@ -646,6 +646,8 @@ fn main() -> i64 {
             <div class="status-item"><div class="status-item-top"><span class="status-item-name">Circuit Breaker</span></div><div class="status-item-val" id="dashCircuit" style="color:var(--gn)">--</div></div>
             <div class="status-item"><div class="status-item-top"><span class="status-item-name">Ollama SLM</span></div><div class="status-item-val" id="dashOllama" style="color:var(--or)">--</div></div>
             <div class="status-item"><div class="status-item-top"><span class="status-item-name">Integrity</span></div><div class="status-item-val" id="dashIntegrity" style="color:var(--gn)">✓</div></div>
+            <div class="status-item"><div class="status-item-top"><span class="status-item-name">Compute</span></div><div class="status-item-val" id="dashCompute" style="color:var(--cy)">--</div></div>
+            <div class="status-item"><div class="status-item-top"><span class="status-item-name">Vendors</span></div><div class="status-item-val" id="dashVendors" style="color:var(--vi)">--</div></div>
           </div>
         </div>
         <div class="dash-card">
@@ -922,10 +924,18 @@ function renderModelPicker() {
     const c = COLORS[m.name] || '#94a3b8';
     const sel = m.name === selectedModel ? 'selected' : '';
     const isLocal = m.name.endsWith('-local');
-    const tag = isLocal ? '<span class="mp-local-tag">LOCAL</span>' : '';
+    const vendor = m.vendor || 'openrouter';
+    let vendorBadge = '';
+    if (isLocal) {
+      vendorBadge = '<span class="mp-local-tag">LOCAL</span>';
+    } else if (vendor === 'openrouter') {
+      vendorBadge = '<span class="mp-local-tag" style="background:rgba(139,92,246,0.1);color:#a78bfa;border-color:rgba(139,92,246,0.15)">OPENROUTER</span>';
+    } else {
+      vendorBadge = `<span class="mp-local-tag" style="background:rgba(34,197,94,0.1);color:#86efac;border-color:rgba(34,197,94,0.15)">DIRECT · ${vendor.toUpperCase()}</span>`;
+    }
     const price = isLocal ? 'Free (local GPU)' : `$${m.input_cost_per_m}/M in · $${m.output_cost_per_m}/M out`;
     return `<div class="mp-model ${sel}" onclick="selectModel('${m.name}')" data-model="${m.name}">
-      <div class="mp-model-name"><span class="mp-model-dot" style="background:${c}"></span>${m.name}${tag}</div>
+      <div class="mp-model-name"><span class="mp-model-dot" style="background:${c}"></span>${m.name}${vendorBadge}</div>
       <div class="mp-model-id">${m.model_id}</div>
       <div class="mp-model-price">${price}</div>
     </div>`;
@@ -986,7 +996,7 @@ function addMessage(role, content, model, isLoading, meta) {
   if (!isLoading && role === 'ai') {
     const btn = document.createElement('button');
     btn.className = 'ag-export-btn';
-    btn.textContent = '📤 Send to Antigravity';
+    btn.textContent = '📤 Export to IDEs';
     btn.dataset.agType = 'chat';
     btn.dataset.agModel = model || '';
     btn.dataset.agTitle = (model + ': ' + content.replace(/<[^>]*>/g,'').substring(0,60)).trim();
@@ -1019,10 +1029,10 @@ document.addEventListener('click', function(e) {
   const model   = btn.dataset.agModel   || '';
   const title   = btn.dataset.agTitle   || 'Forge export';
   const content = btn.dataset.agContent || '';
-  exportToAntigravity(type, model, title, { response: content }, btn);
+  exportToIDEs(type, model, title, { response: content }, btn);
 });
 
-async function exportToAntigravity(type, model, title, content, btn) {
+async function exportToIDEs(type, model, title, content, btn) {
   if (btn) { btn.textContent = '\u23f3 Syncing...'; }
   try {
     const res = await fetch(API + '/api/export', {
@@ -1031,8 +1041,8 @@ async function exportToAntigravity(type, model, title, content, btn) {
     });
     const data = await res.json();
     if (data.ok) {
-      if (btn) { btn.textContent = '✅ Synced to Antigravity!'; btn.classList.add('sent'); }
-      document.querySelector('.sb-btn[data-panel="antigravity"]').click();
+      const targets = (data.delivered_to || ['synced']).join(', ');
+      if (btn) { btn.textContent = `✅ Sent → ${targets}`; btn.classList.add('sent'); }
       loadAgInbox();
     } else {
       if (btn) { btn.textContent = '\u274c Failed'; }
@@ -1506,23 +1516,43 @@ function updateBudgetUI(b) {
 
 async function refreshDashboard() {
   try {
-    const [bRes, pRes, hRes] = await Promise.all([fetch(API+'/api/budget'), fetch(API+'/api/provenance'), fetch(API+'/api/health')]);
+    const [bRes, pRes, hRes, cRes, vRes] = await Promise.all([
+      fetch(API+'/api/budget'), fetch(API+'/api/provenance'), fetch(API+'/api/health'),
+      fetch(API+'/api/compute').catch(()=>({json:()=>Promise.resolve({})})),
+      fetch(API+'/api/vendor-health').catch(()=>({json:()=>Promise.resolve({})})),
+    ]);
     const budget = await bRes.json();
     const prov = await pRes.json();
     const health = await hRes.json();
+    const compute = await cRes.json();
+    const vendors = await vRes.json();
+
+    // ── KPIs (enhanced with vendor + GPU info) ──
+    const activeVendors = health.active_vendors || [];
+    const gpuCount = (compute.gpus || []).length;
+    const gpuLabel = gpuCount > 0 ? `${gpuCount} GPU${gpuCount>1?'s':''}` : 'CPU Only';
     document.getElementById('dashKpis').innerHTML = [
       {val:'$'+budget.total_cost.toFixed(4), lbl:'Total Cost', c:'var(--or)', icon:'💰'},
       {val:budget.total_tokens.toLocaleString(), lbl:'Total Tokens', c:'var(--vi)', icon:'🔤'},
       {val:budget.request_count, lbl:'API Requests', c:'var(--cy)', icon:'📡'},
-      {val:health.vitalis || '?', lbl:'Vitalis Version', c:'var(--gn)', icon:'⚡'},
+      {val:activeVendors.length, lbl:'Active Vendors', c:'var(--gn)', icon:'🔌'},
+      {val:gpuLabel, lbl:'Compute Hardware', c:'var(--or)', icon:'⚡'},
+      {val:health.vitalis || '?', lbl:'Vitalis Version', c:'var(--vi)', icon:'🧬'},
     ].map(k => `<div class="kpi"><div style="position:absolute;top:0;left:0;right:0;height:2px;background:${k.c}"></div><span class="kpi-icon" style="color:${k.c}">${k.icon}</span><div class="kpi-val" style="color:${k.c}">${k.val}</div><div class="kpi-lbl">${k.lbl}</div></div>`).join('');
+
+    // ── Provider Cost Breakdown ──
     const pd = document.getElementById('dashProviders');
     if (Object.keys(budget.providers).length) {
       pd.innerHTML = Object.entries(budget.providers).map(([name,d]) => {
         const c = COLORS[name]||'#94a3b8';
+        // Check if vendor has direct key
+        const vendorInfo = vendors[name];
+        const routeBadge = vendorInfo && vendorInfo.active
+          ? '<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(34,197,94,0.1);color:#86efac;border:1px solid rgba(34,197,94,0.12);margin-left:4px">DIRECT</span>'
+          : '<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(139,92,246,0.1);color:#a78bfa;border:1px solid rgba(139,92,246,0.12);margin-left:4px">RELAY</span>';
         return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
           <span class="mp-model-dot" style="background:${c}"></span>
-          <span style="font-weight:800;font-size:12px;min-width:80px">${name}</span>
+          <span style="font-weight:800;font-size:12px;min-width:80px">${name}${routeBadge}</span>
           <span class="mono" style="font-size:11px;color:var(--tx2)">${d.total_tokens} tok</span>
           <span class="mono" style="font-size:11px;color:var(--tx2)">${d.calls} calls</span>
           <span class="mono" style="font-size:11px;font-weight:700;color:${c}">$${d.total_cost.toFixed(4)}</span></div>`;
@@ -1540,6 +1570,30 @@ async function refreshDashboard() {
     const dU = document.getElementById('dashUptime'); if(dU) dU.textContent = uptimeStr;
     const dC = document.getElementById('dashCircuit'); if(dC) { dC.textContent = health.circuit_breaker || 'closed'; dC.style.color = health.circuit_breaker === 'closed' ? 'var(--gn)' : 'var(--rd)'; }
     const dI = document.getElementById('dashIntegrity'); if(dI) { dI.textContent = health.provenance_integrity ? '✓ Valid' : '✗ Tampered'; dI.style.color = health.provenance_integrity !== false ? 'var(--gn)' : 'var(--rd)'; }
+
+    // ── Compute Hardware ──
+    const dComp = document.getElementById('dashCompute');
+    if (dComp) {
+      const mode = (compute.resolved_mode || compute.compute_mode || 'auto').toUpperCase();
+      const gpus = compute.gpus || [];
+      if (gpus.length > 0) {
+        const gpuName = gpus[0].name || 'GPU';
+        const vram = gpus[0].vram_total_mb ? ` (${Math.round(gpus[0].vram_total_mb/1024)}GB)` : '';
+        dComp.textContent = `${mode} · ${gpuName}${vram}`;
+        dComp.style.color = 'var(--gn)';
+      } else {
+        const ram = compute.ram_gb ? ` · ${compute.ram_gb}GB RAM` : '';
+        dComp.textContent = `${mode}${ram}`;
+        dComp.style.color = compute.ram_gb >= 16 ? 'var(--cy)' : 'var(--or)';
+      }
+    }
+
+    // ── Active Vendors ──
+    const dVend = document.getElementById('dashVendors');
+    if (dVend) {
+      dVend.textContent = activeVendors.length > 0 ? activeVendors.join(', ') : 'None';
+      dVend.style.color = activeVendors.length > 0 ? 'var(--gn)' : 'var(--rd)';
+    }
 
     // ── Model Usage Bars ──
     const mu = document.getElementById('dashModelUsage');
@@ -1565,7 +1619,8 @@ async function refreshDashboard() {
     // ── Ollama status ──
     const dO = document.getElementById('dashOllama');
     if (dO) {
-      try { const oRes = await fetch('http://localhost:11434/api/tags', {signal:AbortSignal.timeout(2000)}); dO.textContent = oRes.ok ? 'Online' : 'Offline'; dO.style.color = oRes.ok ? 'var(--gn)' : 'var(--rd)'; } catch(oe) { dO.textContent = 'Offline'; dO.style.color = 'var(--rd)'; }
+      const ollamaEndpoint = (vendors.ollama && vendors.ollama.endpoint) ? vendors.ollama.endpoint.replace('/api/chat', '/api/tags') : 'http://localhost:11434/api/tags';
+      try { const oRes = await fetch(ollamaEndpoint, {signal:AbortSignal.timeout(2000)}); dO.textContent = oRes.ok ? 'Online' : 'Offline'; dO.style.color = oRes.ok ? 'var(--gn)' : 'var(--rd)'; } catch(oe) { dO.textContent = 'Offline'; dO.style.color = 'var(--rd)'; }
     }
   } catch(e) { console.error(e); }
 }

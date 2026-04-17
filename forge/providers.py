@@ -1,7 +1,11 @@
 """
-The Forge — Real LLM Providers via OpenRouter + Cost Tracking
+The Forge — Multi-Vendor LLM Providers with Smart Routing
 
-Calls Claude, GPT-4, Gemini, and DeepSeek through OpenRouter's unified API.
+Smart routing architecture:
+  1. If a direct vendor API key is set (e.g. ANTHROPIC_API_KEY), call the vendor directly.
+  2. If not, fall back to OpenRouter as a universal relay.
+  3. Local models always route to Ollama.
+
 Every request is traced for cost, token usage, and latency via the BudgetTracker.
 
 Modes:
@@ -14,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -21,10 +26,189 @@ from typing import Optional
 
 from .budget import RequestTrace, get_tracker, estimate_tokens
 
+# ── Vendor Endpoints ─────────────────────────────────────────────────────────
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+ANTHROPIC_URL  = "https://api.anthropic.com/v1/messages"
+OPENAI_URL     = "https://api.openai.com/v1/chat/completions"
+DEEPSEEK_URL   = "https://api.deepseek.com/chat/completions"
+GOOGLE_AI_URL  = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
 def _get_key() -> str:
     return os.environ.get("OPENROUTER_API_KEY", "")
+
+def _ollama_host() -> str:
+    return os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+
+# ── Vendor Key Resolution ────────────────────────────────────────────────────
+
+# Maps model_id prefix → (env var name, direct call function name)
+_VENDOR_MAP = {
+    "anthropic/": ("ANTHROPIC_API_KEY", "anthropic"),
+    "openai/":    ("OPENAI_API_KEY",    "openai"),
+    "google/":    ("GOOGLE_AI_API_KEY",  "google"),
+    "deepseek/":  ("DEEPSEEK_API_KEY",   "deepseek"),
+}
+
+def _resolve_vendor(model_id: str) -> tuple[str, str]:
+    """Determine which vendor to call and with which API key.
+
+    Returns (vendor_name, api_key).
+    Prefers direct vendor key; falls back to OpenRouter.
+    """
+    for prefix, (env_var, vendor_name) in _VENDOR_MAP.items():
+        if model_id.startswith(prefix):
+            direct_key = os.environ.get(env_var, "")
+            if direct_key:
+                return vendor_name, direct_key
+            break  # no direct key → fall through to OpenRouter
+
+    or_key = _get_key()
+    if or_key:
+        return "openrouter", or_key
+
+    raise RuntimeError(
+        f"No API key for {model_id}. Set a direct vendor key or OPENROUTER_API_KEY. "
+        f"See .env.example for details."
+    )
+
+def get_vendor_status() -> dict[str, dict]:
+    """Return connection status for every vendor — used by /api/vendor-health."""
+    vendors = {
+        "openrouter":  {"key_env": "OPENROUTER_API_KEY",  "endpoint": OPENROUTER_URL},
+        "anthropic":   {"key_env": "ANTHROPIC_API_KEY",   "endpoint": ANTHROPIC_URL},
+        "openai":      {"key_env": "OPENAI_API_KEY",      "endpoint": OPENAI_URL},
+        "google":      {"key_env": "GOOGLE_AI_API_KEY",   "endpoint": GOOGLE_AI_URL},
+        "deepseek":    {"key_env": "DEEPSEEK_API_KEY",    "endpoint": DEEPSEEK_URL},
+        "ollama":      {"key_env": None,                   "endpoint": f"{_ollama_host()}/api/chat"},
+    }
+    result = {}
+    for name, info in vendors.items():
+        has_key = bool(os.environ.get(info["key_env"], "")) if info["key_env"] else True
+        result[name] = {"active": has_key, "endpoint": info["endpoint"]}
+    # Attach hardware info
+    result["_compute"] = detect_compute_hardware()
+    return result
+
+
+# ── Hardware Detection & Compute Mode ────────────────────────────────────────
+
+def _get_compute_mode() -> str:
+    """Get configured compute mode.
+    
+    Values:
+      auto  — detect GPU, fallback to CPU (default)
+      gpu   — force GPU (all layers)
+      cpu   — force CPU only (num_gpu=0)
+      split — split across GPU+CPU (num_gpu=half)
+    """
+    return os.environ.get("FORGE_COMPUTE", "auto").lower()
+
+
+def detect_compute_hardware() -> dict:
+    """Detect available compute hardware for local inference.
+    
+    Returns a dict with GPU info, CPU info, and recommended compute mode.
+    Works on Windows, Linux, and macOS.
+    """
+    import subprocess
+    hw = {
+        "gpus": [],
+        "cpu_cores": os.cpu_count() or 1,
+        "ram_gb": 0,
+        "compute_mode": _get_compute_mode(),
+        "platform": sys.platform,
+    }
+    
+    # Detect RAM
+    try:
+        import psutil
+        hw["ram_gb"] = round(psutil.virtual_memory().total / (1024**3), 1)
+    except ImportError:
+        # Fallback for systems without psutil
+        try:
+            if os.name == "nt":
+                out = subprocess.check_output(
+                    'wmic computersystem get totalphysicalmemory /value',
+                    shell=True, text=True, timeout=3
+                )
+                for line in out.strip().split('\n'):
+                    if 'TotalPhysicalMemory' in line:
+                        hw["ram_gb"] = round(int(line.split('=')[1].strip()) / (1024**3), 1)
+        except Exception:
+            pass
+    
+    # Detect NVIDIA GPUs
+    try:
+        out = subprocess.check_output(
+            'nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version --format=csv,noheader,nounits',
+            shell=True, text=True, timeout=3
+        )
+        for i, line in enumerate(out.strip().split('\n')):
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 4:
+                hw["gpus"].append({
+                    "index": i,
+                    "name": parts[0],
+                    "vram_total_mb": int(parts[1]),
+                    "vram_free_mb": int(parts[2]),
+                    "driver": parts[3],
+                    "vendor": "nvidia",
+                })
+    except Exception:
+        pass
+    
+    # Detect AMD GPUs (ROCm)
+    if not hw["gpus"]:
+        try:
+            out = subprocess.check_output(
+                'rocm-smi --showproductname --showmeminfo vram --csv',
+                shell=True, text=True, timeout=3
+            )
+            if 'GPU' in out:
+                hw["gpus"].append({"index": 0, "name": "AMD ROCm GPU", "vendor": "amd"})
+        except Exception:
+            pass
+    
+    # Detect Apple Silicon (macOS unified memory)
+    if not hw["gpus"] and os.name != "nt":
+        try:
+            out = subprocess.check_output(
+                'sysctl -n machdep.cpu.brand_string',
+                shell=True, text=True, timeout=3
+            )
+            if 'Apple' in out:
+                hw["gpus"].append({
+                    "index": 0,
+                    "name": out.strip(),
+                    "vram_total_mb": int(hw["ram_gb"] * 1024),  # unified memory
+                    "vendor": "apple",
+                })
+        except Exception:
+            pass
+    
+    # Auto-resolve compute mode
+    if hw["compute_mode"] == "auto":
+        if hw["gpus"]:
+            hw["resolved_mode"] = "gpu"
+        elif hw["ram_gb"] >= 16:
+            hw["resolved_mode"] = "cpu"  # enough RAM for CPU inference
+        else:
+            hw["resolved_mode"] = "cpu"
+    else:
+        hw["resolved_mode"] = hw["compute_mode"]
+    
+    # Compute num_gpu for Ollama
+    if hw["resolved_mode"] == "cpu":
+        hw["ollama_num_gpu"] = 0
+    elif hw["resolved_mode"] == "split":
+        hw["ollama_num_gpu"] = 999 // 2  # half layers on GPU
+    else:
+        hw["ollama_num_gpu"] = 999  # all layers on GPU (Ollama default)
+    
+    return hw
+
 
 
 # ── Model Registry ───────────────────────────────────────────────────────────
@@ -41,7 +225,7 @@ MODELS = {
     "gpt-mini":   "openai/gpt-5.4-mini",
     "gpt-nano":   "openai/gpt-5.4-nano",
     "gemini-lite": "google/gemini-2.5-flash",
-    # Local SLM (runs on GPU via Ollama)
+    # Local SLM (runs via Ollama — GPU, CPU, or Apple Silicon)
     "qwen-local": "qwen2.5-coder:7b",
 }
 
@@ -133,15 +317,25 @@ def call_ollama_chat(
     """
     tracker = get_tracker()
 
+    # Resolve compute mode for local inference (GPU / CPU / split)
+    hw = detect_compute_hardware()
+    num_gpu = hw.get("ollama_num_gpu", 999)
+
     payload = json.dumps({
         "model": model_id,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": temperature, "num_ctx": 8192, "num_predict": max_tokens},
+        "options": {
+            "temperature": temperature,
+            "num_ctx": 8192,
+            "num_predict": max_tokens,
+            "num_gpu": num_gpu,
+        },
     }).encode("utf-8")
 
+    ollama_endpoint = f"{_ollama_host()}/api/chat"
     req = urllib.request.Request(
-        "http://localhost:11434/api/chat",
+        ollama_endpoint,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -153,7 +347,7 @@ def call_ollama_chat(
             data = json.loads(resp.read().decode("utf-8"))
             latency_ms = (time.time() - t0) * 1000
     except Exception as e:
-        raise RuntimeError(f"Ollama local error ({model_id}): {e}")
+        raise RuntimeError(f"Ollama local error ({model_id} at {ollama_endpoint}): {e}")
 
     content = data["message"]["content"]
 
@@ -166,6 +360,7 @@ def call_ollama_chat(
         timestamp=time.time(),
         model_id=model_id,
         provider_name=provider_name or "qwen-local",
+        vendor="ollama",
         purpose=purpose,
         input_tokens=in_tok,
         output_tokens=out_tok,
@@ -182,7 +377,345 @@ def call_ollama_chat(
         "output_tokens": out_tok,
         "cost_usd": 0.0,
         "latency_ms": latency_ms,
+        "vendor": "ollama",
     }
+
+
+# ── Direct Vendor Callers ────────────────────────────────────────────────────
+
+def call_anthropic(
+    model_id: str,
+    messages: list[dict],
+    api_key: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """Call Anthropic Messages API directly (no OpenRouter middleman)."""
+    tracker = get_tracker()
+    if tracker.is_exhausted:
+        raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
+
+    # Anthropic requires system as a top-level param, not in messages
+    system_text = ""
+    api_messages = []
+    for m in messages:
+        if m["role"] == "system":
+            system_text += m.get("content", "") + "\n"
+        else:
+            api_messages.append({"role": m["role"], "content": m["content"]})
+
+    # Strip the vendor prefix for the Anthropic API
+    bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+
+    body = {
+        "model": bare_model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": api_messages,
+    }
+    if system_text.strip():
+        body["system"] = system_text.strip()
+
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        ANTHROPIC_URL,
+        data=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            latency_ms = (time.time() - t0) * 1000
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Anthropic {e.code}: {body_text[:300]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Anthropic network error: {e.reason}")
+
+    # Anthropic returns content as a list of blocks
+    content_blocks = data.get("content", [])
+    content = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+    usage = data.get("usage", {})
+
+    prompt_text = " ".join(m.get("content", "") for m in messages)
+    trace = RequestTrace(
+        timestamp=time.time(),
+        model_id=model_id,
+        provider_name=provider_name or "claude",
+        vendor="anthropic",
+        purpose=purpose,
+        input_tokens=usage.get("input_tokens", estimate_tokens(prompt_text)),
+        output_tokens=usage.get("output_tokens", estimate_tokens(content)),
+        total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        cost_usd=0,
+        api_latency_ms=latency_ms,
+        generation=generation,
+        submission_id=submission_id,
+        prompt_chars=len(prompt_text),
+        response_chars=len(content),
+    )
+    tracker.record(trace)
+
+    return content, {
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "cost_usd": trace.cost_usd,
+        "latency_ms": latency_ms,
+        "vendor": "anthropic",
+    }
+
+
+def call_openai_direct(
+    model_id: str,
+    messages: list[dict],
+    api_key: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """Call OpenAI Chat Completions API directly."""
+    tracker = get_tracker()
+    if tracker.is_exhausted:
+        raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
+
+    bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+
+    payload = json.dumps({
+        "model": bare_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        OPENAI_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            latency_ms = (time.time() - t0) * 1000
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI {e.code}: {body_text[:300]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"OpenAI network error: {e.reason}")
+
+    content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
+
+    prompt_text = " ".join(m.get("content", "") for m in messages)
+    trace = RequestTrace(
+        timestamp=time.time(),
+        model_id=model_id,
+        provider_name=provider_name or "gpt",
+        vendor="openai",
+        purpose=purpose,
+        input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
+        output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
+        total_tokens=usage.get("total_tokens", 0),
+        cost_usd=0,
+        api_latency_ms=latency_ms,
+        generation=generation,
+        submission_id=submission_id,
+        prompt_chars=len(prompt_text),
+        response_chars=len(content),
+    )
+    trace.total_tokens = trace.input_tokens + trace.output_tokens
+    tracker.record(trace)
+
+    return content, {
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "cost_usd": trace.cost_usd,
+        "latency_ms": latency_ms,
+        "vendor": "openai",
+    }
+
+
+def call_google_direct(
+    model_id: str,
+    messages: list[dict],
+    api_key: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """Call Google AI Gemini via their OpenAI-compatible endpoint."""
+    tracker = get_tracker()
+    if tracker.is_exhausted:
+        raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
+
+    bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+
+    payload = json.dumps({
+        "model": bare_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode("utf-8")
+
+    endpoint = f"{GOOGLE_AI_URL}?key={api_key}"
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            latency_ms = (time.time() - t0) * 1000
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google AI {e.code}: {body_text[:300]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Google AI network error: {e.reason}")
+
+    content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
+
+    prompt_text = " ".join(m.get("content", "") for m in messages)
+    trace = RequestTrace(
+        timestamp=time.time(),
+        model_id=model_id,
+        provider_name=provider_name or "gemini",
+        vendor="google",
+        purpose=purpose,
+        input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
+        output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
+        total_tokens=usage.get("total_tokens", 0),
+        cost_usd=0,
+        api_latency_ms=latency_ms,
+        generation=generation,
+        submission_id=submission_id,
+        prompt_chars=len(prompt_text),
+        response_chars=len(content),
+    )
+    trace.total_tokens = trace.input_tokens + trace.output_tokens
+    tracker.record(trace)
+
+    return content, {
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "cost_usd": trace.cost_usd,
+        "latency_ms": latency_ms,
+        "vendor": "google",
+    }
+
+
+def call_deepseek_direct(
+    model_id: str,
+    messages: list[dict],
+    api_key: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """Call DeepSeek Chat API directly."""
+    tracker = get_tracker()
+    if tracker.is_exhausted:
+        raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
+
+    bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+
+    payload = json.dumps({
+        "model": bare_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        DEEPSEEK_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            latency_ms = (time.time() - t0) * 1000
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"DeepSeek {e.code}: {body_text[:300]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"DeepSeek network error: {e.reason}")
+
+    content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
+
+    prompt_text = " ".join(m.get("content", "") for m in messages)
+    trace = RequestTrace(
+        timestamp=time.time(),
+        model_id=model_id,
+        provider_name=provider_name or "deepseek",
+        vendor="deepseek",
+        purpose=purpose,
+        input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
+        output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
+        total_tokens=usage.get("total_tokens", 0),
+        cost_usd=0,
+        api_latency_ms=latency_ms,
+        generation=generation,
+        submission_id=submission_id,
+        prompt_chars=len(prompt_text),
+        response_chars=len(content),
+    )
+    trace.total_tokens = trace.input_tokens + trace.output_tokens
+    tracker.record(trace)
+
+    return content, {
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "cost_usd": trace.cost_usd,
+        "latency_ms": latency_ms,
+        "vendor": "deepseek",
+    }
+
+
+# ── Smart Router Dispatch ────────────────────────────────────────────────────
+
+_VENDOR_CALLERS = {
+    "anthropic": call_anthropic,
+    "openai":    call_openai_direct,
+    "google":    call_google_direct,
+    "deepseek":  call_deepseek_direct,
+}
 
 
 def call_model(
@@ -196,7 +729,10 @@ def call_model(
     submission_id: str = "",
 ) -> tuple[str, dict]:
     """
-    Unified entry point: routes to Ollama for local models, OpenRouter otherwise.
+    Unified entry point with SMART ROUTING:
+      1. Local models → Ollama
+      2. Direct vendor key available → call vendor API directly
+      3. Otherwise → OpenRouter fallback
     """
     if _is_local_model(provider_name):
         return call_ollama_chat(
@@ -204,6 +740,19 @@ def call_model(
             max_tokens=max_tokens, temperature=temperature,
             provider_name=provider_name, purpose=purpose,
         )
+
+    vendor, api_key = _resolve_vendor(model_id)
+    caller = _VENDOR_CALLERS.get(vendor)
+
+    if caller:
+        return caller(
+            model_id, messages, api_key,
+            max_tokens=max_tokens, temperature=temperature,
+            provider_name=provider_name, purpose=purpose,
+            generation=generation, submission_id=submission_id,
+        )
+
+    # Default: OpenRouter
     return call_openrouter(
         model_id, messages,
         max_tokens=max_tokens, temperature=temperature,
@@ -244,13 +793,14 @@ def call_openrouter(
         "temperature": temperature,
     }).encode("utf-8")
 
+    referer = os.environ.get("FORGE_HTTP_REFERER", "https://github.com/ModernOps888/the-forge")
     req = urllib.request.Request(
         OPENROUTER_URL,
         data=payload,
         headers={
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/ModernOps888/the-forge",
+            "HTTP-Referer": referer,
             "X-Title": "The Forge",
         },
         method="POST",
@@ -276,6 +826,7 @@ def call_openrouter(
         timestamp=time.time(),
         model_id=model_id,
         provider_name=provider_name or model_id.split("/")[0],
+        vendor="openrouter",
         purpose=purpose,
         input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
         output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
@@ -297,6 +848,7 @@ def call_openrouter(
         "output_tokens": trace.output_tokens,
         "cost_usd": trace.cost_usd,
         "latency_ms": latency_ms,
+        "vendor": "openrouter",
     }
 
 

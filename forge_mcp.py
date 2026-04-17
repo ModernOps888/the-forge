@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from forge.compiler import compile_and_run, vitalis_version
-from forge.providers import call_openrouter, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM
+from forge.providers import call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM, get_vendor_status
 from forge.budget import get_tracker, BudgetConfig
 from forge.governance import get_provenance, get_policy_engine
 from forge.factory import build as factory_build, ARTIFACT_TYPES
@@ -179,7 +179,7 @@ TOOLS = [
     },
     {
         "name": "forge_chat",
-        "description": "Chat with any model via OpenRouter. Cost-tracked. Use cheapest model (gemini) for simple tasks, claude for complex reasoning.",
+        "description": "Chat with any model via smart vendor routing (direct API or OpenRouter fallback). Cost-tracked. Use cheapest model (gemini) for simple tasks, claude for complex reasoning.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -216,20 +216,9 @@ TOOLS = [
         },
     },
     {
-        "name": "forge_orchestrate",
-        "description": "Master Orchestrator: Give a high-level task, and Claude will automatically design the constraints, write the tests, and deploy a cohort of local SLM workers to solve it via evolution.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "High-level goal description"},
-                "models": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Worker models (default: ['qwen-local'])",
-                },
-            },
-            "required": ["task"],
-        },
+        "name": "forge_provider_status",
+        "description": "Get status of all configured LLM vendors (Anthropic, OpenAI, Google, DeepSeek, OpenRouter, Ollama). Shows which have active API keys and their endpoints.",
+        "inputSchema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -311,7 +300,7 @@ def handle_forge_research(params: dict) -> dict:
             {"role": "user", "content": query},
         ]
         try:
-            content, usage = call_openrouter(
+            content, usage = call_model(
                 model_id, messages, max_tokens=2048, temperature=0.4,
                 provider_name=name, purpose="mcp_research",
             )
@@ -343,7 +332,7 @@ def handle_forge_consensus(params: dict) -> dict:
             {"role": "user", "content": query},
         ]
         try:
-            content, _ = call_openrouter(
+            content, _ = call_model(
                 model_id, messages, max_tokens=2048, temperature=0.4,
                 provider_name=name, purpose="mcp_consensus",
             )
@@ -362,7 +351,7 @@ def handle_forge_consensus(params: dict) -> dict:
         {"role": "system", "content": "You are a synthesis agent."},
         {"role": "user", "content": synth_prompt},
     ]
-    merged, _ = call_openrouter(synth_model, synth_msgs, max_tokens=2048, temperature=0.3,
+    merged, _ = call_model(synth_model, synth_msgs, max_tokens=2048, temperature=0.3,
                                  provider_name="gemini", purpose="mcp_synthesis")
 
     return {
@@ -381,7 +370,7 @@ def handle_forge_chat(params: dict) -> dict:
         {"role": "system", "content": CHAT_SYSTEM},
         {"role": "user", "content": message},
     ]
-    content, usage = call_openrouter(
+    content, usage = call_model(
         model_id, messages, max_tokens=2048, temperature=0.5,
         provider_name=model, purpose="mcp_chat",
     )
@@ -390,6 +379,7 @@ def handle_forge_chat(params: dict) -> dict:
         "model": model,
         "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
         "cost": round(usage.get("cost_usd", 0), 6),
+        "vendor": usage.get("vendor", "unknown"),
     }
 
 
@@ -472,7 +462,7 @@ def handle_forge_orchestrate(params: dict) -> dict:
             "}\n\n"
             f"USER TASK: {task}"
         )
-        content, _ = call_openrouter(
+        content, _ = call_model(
             MODELS["claude"],
             [{"role": "user", "content": prompt}],
             max_tokens=1500,
@@ -530,6 +520,7 @@ HANDLERS = {
     "forge_market_search": handle_forge_market_search,
     "forge_provenance": handle_forge_provenance,
     "forge_orchestrate": handle_forge_orchestrate,
+    "forge_provider_status": lambda _: get_vendor_status(),
     "vitalis_score": handle_vitalis_score,
 }
 

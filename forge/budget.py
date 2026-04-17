@@ -48,6 +48,7 @@ class RequestTrace:
     timestamp: float = 0.0
     model_id: str = ""
     provider_name: str = ""
+    vendor: str = ""            # "anthropic", "openai", "google", "deepseek", "openrouter", "ollama"
     purpose: str = ""           # "code_gen", "chat", "research"
     
     # Token metrics
