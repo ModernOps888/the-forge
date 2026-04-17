@@ -225,12 +225,17 @@ MODELS = {
     "gpt-mini":   "openai/gpt-5.4-mini",
     "gpt-nano":   "openai/gpt-5.4-nano",
     "gemini-lite": "google/gemini-2.5-flash",
-    # Local SLM (runs via Ollama — GPU, CPU, or Apple Silicon)
-    "qwen-local": "qwen2.5-coder:7b",
+    # Local models (run via Ollama — GPU, CPU, or Apple Silicon)
+    "qwen-local":    "qwen2.5-coder:7b",
+    "llama-local":   "llama3.2:latest",
+    "codellama":     "codellama:7b",
+    "mistral-local": "mistral:latest",
+    "phi-local":     "phi3:mini",
 }
 
 MODEL_TIERS = {
-    "cheap":   ["gemini", "deepseek", "gpt-nano", "gemini-lite", "qwen-local"],
+    "cheap":   ["gemini", "deepseek", "gpt-nano", "gemini-lite",
+                "qwen-local", "llama-local", "codellama", "mistral-local", "phi-local"],
     "mid":     ["gpt-mini"],
     "premium": ["claude", "gpt"],
     "elite":   ["claude-opus"],
@@ -299,8 +304,16 @@ RULES:
 # ── Core API Call (with full telemetry) ──────────────────────────────────────
 
 def _is_local_model(provider_name: str) -> bool:
-    """Check if a model name refers to a local Ollama model."""
-    return provider_name.endswith("-local")
+    """Check if a model name refers to a local Ollama model.
+    
+    Detection rules:
+      1. Name ends with '-local' (convention)
+      2. Model ID contains ':' but no '/' (Ollama tag format like 'codellama:7b')
+    """
+    if provider_name.endswith("-local"):
+        return True
+    model_id = MODELS.get(provider_name, "")
+    return ":" in model_id and "/" not in model_id
 
 
 def call_ollama_chat(
@@ -346,6 +359,21 @@ def call_ollama_chat(
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             latency_ms = (time.time() - t0) * 1000
+    except urllib.error.URLError as e:
+        if "Connection refused" in str(e) or "10061" in str(e):
+            raise RuntimeError(
+                f"Ollama is not running. Start it with: ollama serve\n"
+                f"Then pull the model: ollama pull {model_id}"
+            )
+        raise RuntimeError(f"Ollama connection error ({model_id}): {e}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        if e.code == 404 or "not found" in body.lower():
+            raise RuntimeError(
+                f"Model '{model_id}' not found in Ollama. Pull it with:\n"
+                f"  ollama pull {model_id}"
+            )
+        raise RuntimeError(f"Ollama HTTP {e.code} ({model_id}): {body[:200]}")
     except Exception as e:
         raise RuntimeError(f"Ollama local error ({model_id} at {ollama_endpoint}): {e}")
 
