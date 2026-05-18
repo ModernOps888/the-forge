@@ -504,18 +504,60 @@ def call_anthropic(
     }
 
 
-def call_openai_direct(
+# ── Retry Helper ─────────────────────────────────────────────────────────
+
+# Transient HTTP codes that are safe to retry with backoff.
+_RETRYABLE_CODES = {429, 500, 502, 503}
+
+def _retry_with_backoff(fn, max_attempts: int = 3, initial_delay: float = 1.0):
+    """Execute `fn()` with exponential backoff on transient HTTP errors.
+
+    Retries on 429 (rate limit), 500, 502, 503 — all other errors
+    propagate immediately. This prevents the entire pipeline from
+    crashing during brief cloud outages or rate-limit bursts.
+    """
+    delay = initial_delay
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            if e.code not in _RETRYABLE_CODES or attempt == max_attempts:
+                raise
+            last_err = e
+            time.sleep(delay)
+            delay *= 2  # exponential backoff
+        except urllib.error.URLError:
+            if attempt == max_attempts:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise last_err  # pragma: no cover
+
+
+# ── Common OpenAI-Compatible Vendor Caller ───────────────────────────────
+
+def _call_openai_compatible(
+    endpoint: str,
     model_id: str,
     messages: list[dict],
     api_key: str,
+    vendor_name: str,
+    headers: dict | None = None,
     max_tokens: int = 1024,
     temperature: float = 0.7,
     provider_name: str = "",
     purpose: str = "code_gen",
     generation: int = -1,
     submission_id: str = "",
+    timeout: int = 90,
 ) -> tuple[str, dict]:
-    """Call OpenAI Chat Completions API directly."""
+    """Shared caller for OpenAI-compatible APIs (OpenAI, Google, DeepSeek).
+
+    Eliminates ~180 lines of copy-paste between the three vendor callers
+    that previously existed as separate functions with 95% identical code.
+    Includes retry-with-backoff for transient errors.
+    """
     tracker = get_tracker()
     if tracker.is_exhausted:
         raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
@@ -529,26 +571,34 @@ def call_openai_direct(
         "temperature": temperature,
     }).encode("utf-8")
 
+    # Build default headers (caller can override for Google key-in-URL style)
+    req_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if headers:
+        req_headers.update(headers)
+
     req = urllib.request.Request(
-        OPENAI_URL,
+        endpoint,
         data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=req_headers,
         method="POST",
     )
 
     t0 = time.time()
+    def _do_request():
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = (time.time() - t0) * 1000
+        data = _retry_with_backoff(_do_request)
+        latency_ms = (time.time() - t0) * 1000
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI {e.code}: {body_text[:300]}")
+        raise RuntimeError(f"{vendor_name} {e.code}: {body_text[:300]}")
     except urllib.error.URLError as e:
-        raise RuntimeError(f"OpenAI network error: {e.reason}")
+        raise RuntimeError(f"{vendor_name} network error: {e.reason}")
 
     content = data["choices"][0]["message"]["content"]
     usage = data.get("usage", {})
@@ -557,8 +607,8 @@ def call_openai_direct(
     trace = RequestTrace(
         timestamp=time.time(),
         model_id=model_id,
-        provider_name=provider_name or "gpt",
-        vendor="openai",
+        provider_name=provider_name or vendor_name,
+        vendor=vendor_name,
         purpose=purpose,
         input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
         output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
@@ -578,8 +628,30 @@ def call_openai_direct(
         "output_tokens": trace.output_tokens,
         "cost_usd": trace.cost_usd,
         "latency_ms": latency_ms,
-        "vendor": "openai",
+        "vendor": vendor_name,
     }
+
+
+# ── Direct Vendor Callers (thin wrappers) ────────────────────────────────
+
+def call_openai_direct(
+    model_id: str,
+    messages: list[dict],
+    api_key: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """Call OpenAI Chat Completions API directly."""
+    return _call_openai_compatible(
+        OPENAI_URL, model_id, messages, api_key, "openai",
+        max_tokens=max_tokens, temperature=temperature,
+        provider_name=provider_name or "gpt", purpose=purpose,
+        generation=generation, submission_id=submission_id,
+    )
 
 
 def call_google_direct(
@@ -594,68 +666,14 @@ def call_google_direct(
     submission_id: str = "",
 ) -> tuple[str, dict]:
     """Call Google AI Gemini via their OpenAI-compatible endpoint."""
-    tracker = get_tracker()
-    if tracker.is_exhausted:
-        raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
-
-    bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
-
-    payload = json.dumps({
-        "model": bare_model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }).encode("utf-8")
-
-    endpoint = f"{GOOGLE_AI_URL}?key={api_key}"
-    req = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    # Google uses key-in-URL instead of Authorization header
+    return _call_openai_compatible(
+        f"{GOOGLE_AI_URL}?key={api_key}", model_id, messages, api_key, "google",
+        headers={"Content-Type": "application/json"},  # no Bearer token
+        max_tokens=max_tokens, temperature=temperature,
+        provider_name=provider_name or "gemini", purpose=purpose,
+        generation=generation, submission_id=submission_id,
     )
-
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = (time.time() - t0) * 1000
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Google AI {e.code}: {body_text[:300]}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Google AI network error: {e.reason}")
-
-    content = data["choices"][0]["message"]["content"]
-    usage = data.get("usage", {})
-
-    prompt_text = " ".join(m.get("content", "") for m in messages)
-    trace = RequestTrace(
-        timestamp=time.time(),
-        model_id=model_id,
-        provider_name=provider_name or "gemini",
-        vendor="google",
-        purpose=purpose,
-        input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
-        output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
-        total_tokens=usage.get("total_tokens", 0),
-        cost_usd=0,
-        api_latency_ms=latency_ms,
-        generation=generation,
-        submission_id=submission_id,
-        prompt_chars=len(prompt_text),
-        response_chars=len(content),
-    )
-    trace.total_tokens = trace.input_tokens + trace.output_tokens
-    tracker.record(trace)
-
-    return content, {
-        "input_tokens": trace.input_tokens,
-        "output_tokens": trace.output_tokens,
-        "cost_usd": trace.cost_usd,
-        "latency_ms": latency_ms,
-        "vendor": "google",
-    }
 
 
 def call_deepseek_direct(
@@ -670,70 +688,12 @@ def call_deepseek_direct(
     submission_id: str = "",
 ) -> tuple[str, dict]:
     """Call DeepSeek Chat API directly."""
-    tracker = get_tracker()
-    if tracker.is_exhausted:
-        raise RuntimeError(f"Budget exhausted (${tracker.total_cost:.4f} / ${tracker.budget.max_budget_usd:.2f})")
-
-    bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
-
-    payload = json.dumps({
-        "model": bare_model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        DEEPSEEK_URL,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    return _call_openai_compatible(
+        DEEPSEEK_URL, model_id, messages, api_key, "deepseek",
+        max_tokens=max_tokens, temperature=temperature,
+        provider_name=provider_name or "deepseek", purpose=purpose,
+        generation=generation, submission_id=submission_id,
     )
-
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = (time.time() - t0) * 1000
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"DeepSeek {e.code}: {body_text[:300]}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"DeepSeek network error: {e.reason}")
-
-    content = data["choices"][0]["message"]["content"]
-    usage = data.get("usage", {})
-
-    prompt_text = " ".join(m.get("content", "") for m in messages)
-    trace = RequestTrace(
-        timestamp=time.time(),
-        model_id=model_id,
-        provider_name=provider_name or "deepseek",
-        vendor="deepseek",
-        purpose=purpose,
-        input_tokens=usage.get("prompt_tokens", estimate_tokens(prompt_text)),
-        output_tokens=usage.get("completion_tokens", estimate_tokens(content)),
-        total_tokens=usage.get("total_tokens", 0),
-        cost_usd=0,
-        api_latency_ms=latency_ms,
-        generation=generation,
-        submission_id=submission_id,
-        prompt_chars=len(prompt_text),
-        response_chars=len(content),
-    )
-    trace.total_tokens = trace.input_tokens + trace.output_tokens
-    tracker.record(trace)
-
-    return content, {
-        "input_tokens": trace.input_tokens,
-        "output_tokens": trace.output_tokens,
-        "cost_usd": trace.cost_usd,
-        "latency_ms": latency_ms,
-        "vendor": "deepseek",
-    }
 
 
 # ── Smart Router Dispatch ────────────────────────────────────────────────────

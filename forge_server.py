@@ -294,7 +294,13 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             self._json_response({"error": str(e)}, 500)
 
     def _trigger_reload(self):
-        """Threaded hot-swap to drop the active TCP socket and execv a new server process."""
+        """Threaded hot-swap to drop the active TCP socket and start a new server process.
+
+        Windows fix: os.execv() doesn't work properly on Windows — it replaces
+        the process image but can leave the TCP port bound, causing EADDRINUSE
+        on restart. We use subprocess.Popen + sys.exit() instead which ensures
+        clean port handover.
+        """
         import threading
         def restarter():
             time.sleep(1)  # Buffer to allow HTTP response to flush
@@ -303,7 +309,13 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             if _SERVER_INSTANCE:
                 _SERVER_INSTANCE.shutdown()
                 _SERVER_INSTANCE.server_close()
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            if os.name == "nt":
+                # Windows: spawn new process then exit (clean port release)
+                subprocess.Popen([sys.executable] + sys.argv)
+                sys.exit(0)
+            else:
+                # POSIX: in-place process replacement
+                os.execv(sys.executable, [sys.executable] + sys.argv)
         threading.Thread(target=restarter, daemon=True).start()
 
     def _api_self_improve(self, body: dict):

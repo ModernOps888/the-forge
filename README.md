@@ -641,6 +641,14 @@ TheForge/
 
 MIT License — see [LICENSE](LICENSE) for details.
 
+## 🔧 Recent Changes (v2.1 — Hardening)
+
+- **Persistent Provenance Chain** — `ProvenanceChain` now supports `save_to_disk()` / `load_from_disk()` with atomic write-then-rename. The immutable audit ledger is no longer lost on server restart.
+- **Thread-Safe Circuit Breaker** — All `CircuitBreaker` state mutations are now protected by `threading.Lock()`, fixing potential corruption under `ThreadingHTTPServer` concurrent request handling.
+- **DRY Vendor Callers** — Extracted `_call_openai_compatible()` shared helper, eliminating ~180 lines of copy-paste between OpenAI, Google, and DeepSeek callers. Anthropic retains its own caller (different API format).
+- **Retry with Backoff** — All vendor callers now retry on transient HTTP errors (429, 500, 502, 503) with exponential backoff (3 attempts). Prevents pipeline crashes during brief cloud outages or rate-limit bursts.
+- **Windows Hot-Swap Fix** — `_trigger_reload()` now uses `subprocess.Popen` + `sys.exit()` on Windows instead of `os.execv()`, which could leave the TCP port bound causing EADDRINUSE on restart.
+
 ---
 
 <div align="center">

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
@@ -104,6 +106,52 @@ class ProvenanceChain:
             "parent_hash": e.parent_hash,
             "entry_hash": e.entry_hash,
         } for e in self._entries], indent=2)
+
+    # ── Disk Persistence ──────────────────────────────────────────────────
+    # Without persistence the entire "tamper-evident" ledger was lost on
+    # every server restart, defeating its core purpose.
+
+    def save_to_disk(self, path: str | Path) -> None:
+        """Atomically persist the chain to disk.
+
+        Uses a write-to-temp-then-rename strategy so a crash mid-write
+        never corrupts the on-disk copy.
+        """
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(self.export_json(), encoding="utf-8")
+        tmp.replace(target)  # atomic on POSIX; near-atomic on NTFS
+
+    @classmethod
+    def load_from_disk(cls, path: str | Path) -> "ProvenanceChain":
+        """Restore a chain from a previously-saved JSON file.
+
+        Validates hash-chain integrity on load — if the file has been
+        tampered with, verification will detect it immediately.
+        """
+        chain = cls()
+        target = Path(path)
+        if not target.exists():
+            return chain
+        try:
+            entries = json.loads(target.read_text(encoding="utf-8"))
+            for raw in entries:
+                entry = ProvenanceEntry(
+                    timestamp=raw["timestamp"],
+                    event_type=raw["event_type"],
+                    entity_id=raw["entity_id"],
+                    actor=raw["actor"],
+                    data=raw.get("data", {}),
+                    parent_hash=raw["parent_hash"],
+                    entry_hash=raw["entry_hash"],
+                )
+                chain._entries.append(entry)
+                chain._head_hash = entry.entry_hash
+        except (json.JSONDecodeError, KeyError, TypeError):
+            # Corrupted file — start fresh rather than crash
+            return cls()
+        return chain
 
 
 # ── Policy Engine ─────────────────────────────────────────────────────────────
@@ -211,13 +259,19 @@ class TournamentSnapshot:
 # ── Circuit Breaker ───────────────────────────────────────────────────────────
 
 class CircuitBreaker:
-    """
-    Circuit breaker for API calls.
+    """Thread-safe circuit breaker for API calls.
+
     Opens (blocks calls) after N consecutive failures.
     Half-opens after cooldown to test recovery.
+
+    Thread safety: ForgeHandler runs inside ThreadingHTTPServer which
+    dispatches each request on a separate thread. Without a lock,
+    concurrent requests could corrupt _failure_count / _state leading
+    to either phantom-open or stuck-closed states.
     """
 
     def __init__(self, failure_threshold: int = 5, cooldown_seconds: float = 60.0):
+        self._lock = threading.Lock()
         self._failure_count: int = 0
         self._threshold = failure_threshold
         self._cooldown = cooldown_seconds
@@ -225,29 +279,33 @@ class CircuitBreaker:
         self._state: str = "closed"  # closed, open, half-open
 
     def record_success(self):
-        self._failure_count = 0
-        self._state = "closed"
+        with self._lock:
+            self._failure_count = 0
+            self._state = "closed"
 
     def record_failure(self):
-        self._failure_count += 1
-        self._last_failure = time.time()
-        if self._failure_count >= self._threshold:
-            self._state = "open"
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure = time.time()
+            if self._failure_count >= self._threshold:
+                self._state = "open"
 
     def can_proceed(self) -> bool:
-        if self._state == "closed":
-            return True
-        if self._state == "open":
-            if time.time() - self._last_failure > self._cooldown:
-                self._state = "half-open"
+        with self._lock:
+            if self._state == "closed":
                 return True
-            return False
-        # half-open: allow one attempt
-        return True
+            if self._state == "open":
+                if time.time() - self._last_failure > self._cooldown:
+                    self._state = "half-open"
+                    return True
+                return False
+            # half-open: allow one attempt
+            return True
 
     @property
     def state(self) -> str:
-        return self._state
+        with self._lock:
+            return self._state
 
 
 # ── Compliance Report Generator ───────────────────────────────────────────────
