@@ -110,6 +110,10 @@ python forge_server.py
 # → http://localhost:8777
 ```
 
+On first run the server generates a random API key and stores it in `.forge_key`
+(git-ignored). The dashboard fetches it automatically over loopback — you only
+need it yourself for direct `curl`/CLI access. See [🔐 Security](#-security) below.
+
 ### CLI Usage
 
 ```bash
@@ -323,6 +327,30 @@ User instruction → LLM generates line-range patches
 4. Quality floor (30/100 minimum)
 5. Auto-backup before every write
 6. Hot-swap only when patching the server itself
+
+---
+
+## 🔐 Security
+
+The Forge's HTTP server can spend money, read/write files, and — if you opt in —
+run shell commands. It's hardened as follows:
+
+| Control | Behavior |
+|---|---|
+| **Auth** | Every `/api/*` route (except `/api/health`) requires an `X-Forge-Key` header (or `Authorization: Bearer <key>`). Set `FORGE_API_KEY` yourself, or let the server auto-generate one into `.forge_key` on first run (git-ignored). |
+| **Bind address** | Defaults to `127.0.0.1` (loopback-only). Set `FORGE_BIND_HOST=0.0.0.0` only if you deliberately want LAN/remote access. |
+| **CORS** | `Access-Control-Allow-Origin` is only echoed back for `localhost`/`127.0.0.1` origins — no wildcard for arbitrary sites. |
+| **Shell execution** | The cowork agent loop's `<execute_powershell>` tags and GUI keystroke automation are **disabled by default**. Enable with `FORGE_ALLOW_SHELL_EXEC=true`, and even then every command is checked against the governance `PolicyEngine` before it runs. |
+| **Path jailing** | Self-improve patch targets and generated-artifact deploys are resolved and confined to the project root — no writing outside the repo. |
+| **Secret files** | `/api/analyze-file` refuses to read files matching common credential patterns (`.env`, `.pem`, `id_rsa`, `.aws/credentials`, etc.). |
+| **Budget gate** | Every LLM-calling endpoint checks the cost tracker first and returns `402` once `FORGE_BUDGET_USD` is exhausted, instead of spending past the cap. |
+| **Fitness gate (fail-closed)** | If the self-improvement sandbox can't evaluate a patch, the patch is rejected rather than applied. |
+| **Governed deploys** | Every artifact from the Agent Factory is checked by the `PolicyEngine` (AST-based dangerous-call detection, not just substring matching) before `deployer.py` will compile and run it. |
+
+**Local-only tool, not a public service.** The Forge is designed to run on your
+own machine for your own use. Don't put it on the public internet — the auth
+key is a shared secret, not a full identity/authorization system, and features
+like self-improvement and shell exec are inherently high-privilege.
 
 ---
 

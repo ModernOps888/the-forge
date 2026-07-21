@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from .factory import Artifact, FactoryResult
+from .governance import get_policy_engine
 
 
 # ── Deployment Result ─────────────────────────────────────────────────────────
@@ -680,9 +681,15 @@ def _deploy_skill(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     files.append("skill.sl")
 
     try:
-        from .compiler import compile_and_run
-        result = compile_and_run(art.source)
-        note = f"✅ Compiled: {result.output}" if result.success else f"❌ {result.error}"
+        policy = get_policy_engine()
+        violations = policy.check_all({"source_code": art.source})
+        blocking = [v for v in violations if v["action"] == "block"]
+        if blocking:
+            note = f"❌ Blocked by governance policy: {blocking[0]['description']}"
+        else:
+            from .compiler import compile_and_run
+            result = compile_and_run(art.source)
+            note = f"✅ Compiled: {result.output}" if result.success else f"❌ {result.error}"
     except Exception as e:
         note = f"Vitalis compile status unknown: {e}"
 

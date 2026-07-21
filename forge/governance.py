@@ -12,6 +12,7 @@ Enterprise-grade governance layer providing:
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import threading
@@ -183,6 +184,17 @@ DEFAULT_POLICIES = [
 class PolicyEngine:
     """Evaluate governance policies before agent actions."""
 
+    # Fully-qualified (or bare) callable names that indicate real file I/O,
+    # process execution, dynamic code execution, or network access when
+    # found in the AST of Python source — this catches renamed imports /
+    # aliasing / string-built calls that the naive substring scan misses,
+    # e.g. `import os as o; o.system(...)`, `getattr(os, "sys" + "tem")(...)`
+    # would still slip an AST scan too, but direct calls are now caught
+    # regardless of surrounding string literals or comments.
+    _AST_FILE_CALLS = {"open", "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree", "shutil.move", "Path.write_text", "Path.write_bytes"}
+    _AST_PROCESS_CALLS = {"os.system", "os.popen", "os.exec", "os.execv", "os.execve", "os.spawnv", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen", "eval", "exec", "compile"}
+    _AST_NETWORK_CALLS = {"socket.socket", "urllib.request.urlopen", "requests.get", "requests.post", "http.client.HTTPConnection"}
+
     def __init__(self, policies: list[Policy] | None = None):
         self.policies = policies or list(DEFAULT_POLICIES)
 
@@ -202,14 +214,76 @@ class PolicyEngine:
                 })
         return violations
 
+    @staticmethod
+    def _call_name(node: ast.Call) -> str:
+        """Best-effort resolution of a Call node's callee to a dotted name,
+        e.g. `os.system(...)` -> "os.system", `eval(...)` -> "eval"."""
+        func = node.func
+        parts: list[str] = []
+        while isinstance(func, ast.Attribute):
+            parts.append(func.attr)
+            func = func.value
+        if isinstance(func, ast.Name):
+            parts.append(func.id)
+        return ".".join(reversed(parts))
+
+    def _ast_call_names(self, source: str) -> Optional[set[str]]:
+        """Parse `source` as Python and return the set of resolved call
+        names found. Returns None if the source isn't parseable Python
+        (e.g. it's Vitalis/.sl, Rust, Go, TypeScript, etc.) — in that case
+        callers should fall back to substring scanning only."""
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return None
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = self._call_name(node)
+                if name:
+                    names.add(name)
+                    if "." in name:
+                        # Also record the bare trailing attribute so an
+                        # aliased import (`import os as o; o.system(...)`)
+                        # or `from subprocess import Popen; Popen(...)`
+                        # still matches a dotted target like "os.system".
+                        names.add(name.rsplit(".", 1)[-1])
+        return names
+
+    def _matches_any(self, call_names: set[str], targets: set[str]) -> bool:
+        for target in targets:
+            if target in call_names:
+                return True
+            # allow suffix match for module-qualified variants, e.g. a call
+            # resolved as "subprocess.Popen" matches target "subprocess.Popen"
+            # and a bare "Popen" (imported via `from subprocess import Popen`)
+            bare = target.rsplit(".", 1)[-1]
+            if bare in call_names:
+                return True
+        return False
+
     def _evaluate(self, policy: Policy, context: dict) -> bool:
-        """Check if a policy is violated. Returns True if violated."""
+        """Check if a policy is violated. Returns True if violated.
+
+        Uses an AST-based scan of Python call sites as the primary check
+        (catches renamed/aliased calls that a naive substring scan misses),
+        falling back to substring scanning for non-Python source (Vitalis
+        .sl, Rust, Go, TypeScript, ...) where no Python AST is available.
+        """
         source = context.get("source_code", "")
+        call_names = self._ast_call_names(source)
+
         if policy.check == "capability_gate_file":
+            if call_names is not None and self._matches_any(call_names, self._AST_FILE_CALLS):
+                return True
             return any(p in source for p in ("file_write", "file_delete", "file_append"))
         if policy.check == "capability_gate_network":
+            if call_names is not None and self._matches_any(call_names, self._AST_NETWORK_CALLS):
+                return True
             return any(p in source for p in ("http_get", "http_post", "tcp_connect"))
         if policy.check == "capability_gate_process":
+            if call_names is not None and self._matches_any(call_names, self._AST_PROCESS_CALLS):
+                return True
             return any(p in source for p in ("process_exec", "dlopen"))
         if policy.check == "budget_check":
             return context.get("budget_exhausted", False)

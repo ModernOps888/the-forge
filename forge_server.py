@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -70,18 +72,64 @@ from forge.tracer import get_tracer
 # ── Globals ───────────────────────────────────────────────────────────────────
 
 _SERVER_INSTANCE = None
-DASHBOARD_DIR = Path(__file__).parent / "dashboard"
-TRACKER = get_tracker(BudgetConfig(max_budget_usd=50.0))
+PROJECT_ROOT = Path(__file__).parent.resolve()
+DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
+TRACKER = get_tracker(BudgetConfig(max_budget_usd=float(os.environ.get("FORGE_BUDGET_USD", "50.0"))))
 PROVENANCE = get_provenance()
 BREAKER = CircuitBreaker(failure_threshold=5, cooldown_seconds=30)
 CHAT_HISTORIES: dict[str, list[dict]] = {}  # session_id -> messages
+CHAT_HISTORY_ORDER: list[str] = []  # session_id insertion order, for LRU eviction
+MAX_CHAT_SESSIONS = 200
+MAX_HISTORY_MESSAGES_PER_SESSION = 200
 MEMORY = get_memory()  # Three-tier memory: working + episodic + semantic skills
+
+# ── Security config ──────────────────────────────────────────────────────────
+MAX_MODELS_PER_REQUEST = 8
+LOOPBACK_IPS = ("127.0.0.1", "::1", "localhost")
+FORGE_ALLOW_SHELL_EXEC = os.environ.get("FORGE_ALLOW_SHELL_EXEC", "false").strip().lower() in ("1", "true", "yes")
+_SENSITIVE_PATH_PATTERNS = (".env", ".pem", ".key", "id_rsa", "id_ed25519", ".ssh", ".aws/credentials", ".git/config", ".npmrc", ".pypirc")
+
+
+def _load_or_create_api_key() -> str:
+    """Load FORGE_API_KEY from env, or a persisted local key file, or generate one."""
+    env_key = os.environ.get("FORGE_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    key_file = PROJECT_ROOT / ".forge_key"
+    if key_file.exists():
+        existing = key_file.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    generated = secrets.token_hex(24)
+    try:
+        key_file.write_text(generated, encoding="utf-8")
+    except Exception:
+        pass
+    return generated
+
+
+API_KEY = _load_or_create_api_key()
+
+
+def _is_sensitive_path(p: Path) -> bool:
+    s = str(p).replace("\\", "/").lower()
+    return any(pat in s for pat in _SENSITIVE_PATH_PATTERNS)
+
+
+def _touch_chat_session(session: str):
+    """Track LRU order for CHAT_HISTORIES and evict oldest sessions past MAX_CHAT_SESSIONS."""
+    if session in CHAT_HISTORY_ORDER:
+        CHAT_HISTORY_ORDER.remove(session)
+    CHAT_HISTORY_ORDER.append(session)
+    while len(CHAT_HISTORY_ORDER) > MAX_CHAT_SESSIONS:
+        oldest = CHAT_HISTORY_ORDER.pop(0)
+        CHAT_HISTORIES.pop(oldest, None)
 
 # Record server start
 PROVENANCE.record("system_start", "forge_server", "system", {
     "vitalis_version": "loading...",
     "models": list(MODELS.keys()),
-    "budget_usd": 50.0,
+    "budget_usd": TRACKER.budget.max_budget_usd,
 })
 
 
@@ -101,11 +149,28 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
+    _PUBLIC_GET_PATHS = ("/api/health", "/api/auth-bootstrap")
+
+    def _client_is_loopback(self) -> bool:
+        return self.client_address[0] in ("127.0.0.1", "::1")
+
+    def _check_auth(self) -> bool:
+        """Require the Forge API key on every request that isn't explicitly public."""
+        provided = self.headers.get("X-Forge-Key", "").strip()
+        if not provided:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                provided = auth_header[len("Bearer "):].strip()
+        return bool(provided) and secrets.compare_digest(provided, API_KEY)
+
     def do_GET(self):
         t0 = time.monotonic()
         path = urlparse(self.path).path
         if path.startswith("/api/"):
-            self._handle_api_get(path)
+            if path not in self._PUBLIC_GET_PATHS and not self._check_auth():
+                self._json_response({"error": "Unauthorized"}, 401)
+            else:
+                self._handle_api_get(path)
         else:
             # Serve static files from dashboard
             if path == "/":
@@ -117,7 +182,10 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         t0 = time.monotonic()
         path = urlparse(self.path).path
         if path.startswith("/api/"):
-            self._handle_api_post(path)
+            if not self._check_auth():
+                self._json_response({"error": "Unauthorized"}, 401)
+            else:
+                self._handle_api_post(path)
         else:
             self.send_error(404)
         self.log_request_custom(path, 200, (time.monotonic() - t0) * 1000)
@@ -126,6 +194,13 @@ class ForgeHandler(SimpleHTTPRequestHandler):
 
     def _handle_api_get(self, path: str):
         try:
+            if path == "/api/auth-bootstrap":
+                # Same-machine only: lets the locally-served dashboard fetch its own
+                # API key on load without hardcoding it in a static JS file.
+                if not self._client_is_loopback():
+                    return self._json_response({"error": "Forbidden"}, 403)
+                return self._json_response({"key": API_KEY})
+
             if path == "/api/health":
                 valid, _ = PROVENANCE.verify_integrity()
                 vendors = get_vendor_status()
@@ -340,14 +415,19 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         instruction = body.get("instruction")
         model = body.get("model", "claude")
         target_file = body.get("file", str(Path(__file__)))
-        
+
         if not instruction:
             return self._json_response({"error": "No instruction provided"}, 400)
-            
-        target_path = Path(target_file)
+
+        if self._budget_gate():
+            return
+
+        target_path = self._resolve_jailed_path(target_file)
+        if target_path is None:
+            return self._json_response({"error": "Target file must be inside the Forge project directory"}, 403)
         if not target_path.exists():
             return self._json_response({"error": f"Target file not found: {target_file}"}, 404)
-            
+
         current_code = target_path.read_text(encoding="utf-8")
         code_lines = current_code.split("\n")
         total_lines = len(code_lines)
@@ -506,8 +586,12 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                     print(f"  [Gate] PASSED — {b_score:.1f} -> {m_score:.1f} ({delta:+.1f} pts, grade {grade})")
 
                 except Exception as e:
-                    # Non-fatal — log but allow patch through (fitness engine is advisory)
-                    print(f"  [Gate] Sandbox evaluation failed (non-fatal): {e}")
+                    # Fail CLOSED: if the quality gate can't evaluate the patch, refuse it
+                    # rather than let an unscoreable (possibly malicious) patch through.
+                    print(f"  [Gate] BLOCKED — sandbox evaluation failed: {e}")
+                    return self._json_response({
+                        "error": f"Rejected: fitness gate could not evaluate patch ({e})",
+                    }, 400)
             
             # ── Backup + Overwrite ──
             backup_path = target_path.with_suffix(target_path.suffix + ".bak")
@@ -625,7 +709,10 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         
         if not message or not message.strip():
             return self._json_response({"error": "message required"}, 400)
-        
+
+        if self._budget_gate():
+            return
+
         if not BREAKER.can_proceed():
             return self._json_response({"error": "Circuit breaker open"}, 503)
         
@@ -660,14 +747,19 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         """Analyze a local file with AI — used by desktop context menu integration."""
         file_path = body.get("file", "")
         model = body.get("model", "gemini")
-        
+
         if not file_path:
             return self._json_response({"error": "file path required"}, 400)
-        
+
+        if self._budget_gate():
+            return
+
         path = Path(file_path)
+        if _is_sensitive_path(path):
+            return self._json_response({"error": "Refusing to analyze a credential/secret-looking file"}, 403)
         if not path.exists():
             return self._json_response({"error": f"File not found: {file_path}"}, 404)
-        
+
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
@@ -814,41 +906,50 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         import os
         import subprocess
         from pathlib import Path
-        
+
         action = body.get("action")
         target = body.get("target")
-        
+
         if not action or not target:
             return self._json_response({"error": "action and target required"}, 400)
-            
+
         try:
             target_path = Path(target)
-            if not target_path.exists() and action in ["explorer", "ide"]:
+            if not target_path.exists():
                 return self._json_response({"error": f"Path not found: {target}"}, 404)
-                
+
             if action == "explorer":
                 # Open Windows File Explorer focusing the directory or file
                 os.startfile(target_path if target_path.is_dir() else target_path.parent)
-                
+
             elif action == "ide":
-                # Open in Visual Studio Code
-                subprocess.run(["code", str(target_path)], shell=True)
-                
+                # Open in Visual Studio Code — argv list, no shell, no string interpolation
+                subprocess.run(["code", str(target_path)], shell=False)
+
             elif action == "terminal":
-                # Open native PowerShell un-attached and run the target script immediately
+                # Open an unattached PowerShell window in the target's directory.
+                # No shell=True, no string-built command — args are passed as discrete argv
+                # entries so nothing in `target` can break out into a second command.
+                creationflags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
                 if target_path.is_file():
-                    cmd = f'cd "{target_path.parent}"; python "{target_path.name}"'
-                    subprocess.Popen(['start', 'powershell', '-NoExit', '-Command', cmd], shell=True)
+                    subprocess.Popen(
+                        [sys.executable, target_path.name],
+                        cwd=str(target_path.parent),
+                        creationflags=creationflags,
+                    )
                 else:
-                    cmd = f'cd "{target_path}"'
-                    subprocess.Popen(['start', 'powershell', '-NoExit', '-Command', cmd], shell=True)
-                    
+                    subprocess.Popen(
+                        ["powershell", "-NoExit"],
+                        cwd=str(target_path),
+                        creationflags=creationflags,
+                    )
+
             else:
                 return self._json_response({"error": "unknown action"}, 400)
-                
+
             PROVENANCE.record("native_bridge", action, "desktop", {"target": target})
             self._json_response({"ok": True, "action": action})
-            
+
         except Exception as e:
             self._json_response({"error": f"Native execution failed: {str(e)}"}, 500)
 
@@ -870,6 +971,10 @@ class ForgeHandler(SimpleHTTPRequestHandler):
     def _api_transcribe(self):
         """Dynamic JIT Voice-to-Text inference to safely share GPU with LLMs."""
         length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            return self._json_response({"error": "empty body"}, 400)
+        if length > 25_000_000:  # 25MB hard cap
+            return self._json_response({"error": "Audio too large (max 25MB)"}, 413)
         audio_data = self.rfile.read(length)
         
         import tempfile
@@ -1038,13 +1143,18 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         if len(raw_message) > 50000:
             return self._json_response({"error": "Message too long (max 50,000 chars)"}, 400)
 
+        if self._budget_gate():
+            return
+
         # Enrich with URL context (transient — NOT stored in history)
         enriched_message = self._inject_url_context(raw_message)
 
         if not BREAKER.can_proceed():
             return self._json_response({"error": "Circuit breaker open — too many API failures"}, 503)
 
-        # Get or create session history
+        # Get or create session history (LRU-capped so unlimited caller-chosen
+        # session_ids can't grow CHAT_HISTORIES without bound)
+        _touch_chat_session(session)
         if session not in CHAT_HISTORIES:
             CHAT_HISTORIES[session] = []
         history = CHAT_HISTORIES[session]
@@ -1079,6 +1189,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             # Store ONLY the raw message in history (no URL bloat)
             history.append({"role": "user", "content": raw_message})
             history.append({"role": "assistant", "content": content})
+            del history[:-MAX_HISTORY_MESSAGES_PER_SESSION]
 
             # Record provenance
             PROVENANCE.record("chat_message", session, f"provider:{model}", {
@@ -1124,9 +1235,13 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         
         if not raw_message or not raw_message.strip():
             return self._json_response({"error": "message required"}, 400)
-            
+
+        if self._budget_gate():
+            return
+
         enriched_message = self._inject_url_context(raw_message)
 
+        _touch_chat_session(session)
         if session not in CHAT_HISTORIES:
             CHAT_HISTORIES[session] = []
         history = CHAT_HISTORIES[session]
@@ -1152,8 +1267,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             try:
                 self.wfile.write((json.dumps(data) + '\n').encode('utf-8'))
                 self.wfile.flush()
-            except:
-                pass
+            except Exception as e:
+                log.debug("cowork stream_chunk failed (client likely disconnected): %s", e)
         
         max_iterations = 5
         final_content = ""
@@ -1200,26 +1315,29 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                         # --- EXPLICIT CLIPBOARD SYNC FOR IDE PASTING ---
                         import subprocess
                         subprocess.run(["powershell", "-command", "Set-Clipboard", "-Value", "$input"], input=ag_payload.encode('utf-8'))
-                        
-                        # --- AGGRESSIVE NATIVE IDE UX INJECTION ---
-                        try:
-                            from pywinauto import Desktop
-                            from pywinauto.keyboard import send_keys
-                            import time
-                            
-                            for w in Desktop(backend="uia").windows():
-                                if "Antigravity" in w.window_text() or "Visual Studio Code" in w.window_text() or "Cursor" in w.window_text():
-                                    w.set_focus()
-                                    time.sleep(0.3)
-                                    send_keys("^v")
-                                    time.sleep(0.1)
-                                    send_keys("{ENTER}")
-                                    break
-                        except Exception as e:
-                            print(f"[Bridge Warn] GUI Activation failed: {e}")
-                        
+
+                        # --- NATIVE IDE UX INJECTION (opt-in only: FORGE_ALLOW_SHELL_EXEC) ---
+                        # Focuses a window by title match and sends keystrokes — disabled by
+                        # default since it's blind automation driven by model output.
+                        if FORGE_ALLOW_SHELL_EXEC:
+                            try:
+                                from pywinauto import Desktop
+                                from pywinauto.keyboard import send_keys
+                                import time
+
+                                for w in Desktop(backend="uia").windows():
+                                    if "Antigravity" in w.window_text() or "Visual Studio Code" in w.window_text() or "Cursor" in w.window_text():
+                                        w.set_focus()
+                                        time.sleep(0.3)
+                                        send_keys("^v")
+                                        time.sleep(0.1)
+                                        send_keys("{ENTER}")
+                                        break
+                            except Exception as e:
+                                print(f"[Bridge Warn] GUI Activation failed: {e}")
+
                         stream_chunk({"type": "ag_redirect", "file": fname})
-                        
+
                         sys_msg = f"OUTPUT FROM ANTIGRAVITY BRIDGE:\nPayload successfully saved to {inbox_dir}\\{fname}. Antigravity can now read this securely. Tell the user you have sent it!"
                         messages.append({"role": "user", "content": sys_msg})
                         continue
@@ -1232,8 +1350,22 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                     cmd = match.group(1).strip()
                     # Append AI's intent to context
                     messages.append({"role": "assistant", "content": content})
+
+                    if not FORGE_ALLOW_SHELL_EXEC:
+                        stream_chunk({"type": "step", "msg": "Shell execution is disabled (set FORGE_ALLOW_SHELL_EXEC=true to enable)."})
+                        messages.append({"role": "user", "content": "[ERROR: Shell execution is disabled by server policy. Answer without running commands.]"})
+                        continue
+
+                    policy = get_policy_engine()
+                    violations = policy.check_all({"source_code": cmd})
+                    if any(v["action"] == "block" for v in violations):
+                        stream_chunk({"type": "step", "msg": "Command blocked by policy engine."})
+                        messages.append({"role": "user", "content": f"[ERROR: Command blocked by policy: {violations[0].get('description', 'policy violation')}]"})
+                        continue
+
                     stream_chunk({"type": "execute", "cmd": cmd})
-                    
+                    PROVENANCE.record("cowork_shell_exec", session, model, {"cmd": cmd[:500]})
+
                     try:
                         # Execute natively!
                         result = subprocess.run(
@@ -1243,11 +1375,11 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                         output_str = result.stdout + result.stderr
                         if not output_str.strip():
                             output_str = "[Command executed successfully, no output returned.]"
-                            
+
                         # Truncate massive outputs
                         if len(output_str) > 5000:
                             output_str = output_str[:5000] + "... [TRUNCATED]"
-                            
+
                         # Feed the stdout immediately back to the LLM
                         sys_msg = f"OUTPUT FROM OS EXECUTION:\n```\n{output_str}\n```\nAnalyze this output and answer the user, or run another command."
                         messages.append({"role": "user", "content": sys_msg})
@@ -1275,6 +1407,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
 
         history.append({"role": "user", "content": raw_message})
         history.append({"role": "assistant", "content": final_content})
+        del history[:-MAX_HISTORY_MESSAGES_PER_SESSION]
 
         stream_chunk({
             "type": "final",
@@ -1288,11 +1421,13 @@ class ForgeHandler(SimpleHTTPRequestHandler):
     def _api_research(self, body: dict):
         """Fan a research query to multiple models."""
         query = body.get("query", "")
-        models = body.get("models", ["claude", "gpt", "gemini", "deepseek"])
+        models = self._cap_models(body.get("models"), ["claude", "gpt", "gemini", "deepseek"])
 
         if not query:
             return self._json_response({"error": "query required"}, 400)
-            
+        if self._budget_gate():
+            return
+
         query = self._inject_url_context(query)
 
         cost_before = TRACKER.total_cost
@@ -1338,10 +1473,12 @@ class ForgeHandler(SimpleHTTPRequestHandler):
     def _api_consensus(self, body: dict):
         """All models answer + synthesis."""
         query = body.get("query", "")
-        models = body.get("models", ["claude", "gpt", "gemini", "deepseek"])
+        models = self._cap_models(body.get("models"), ["claude", "gpt", "gemini", "deepseek"])
 
         if not query:
             return self._json_response({"error": "query required"}, 400)
+        if self._budget_gate():
+            return
 
         query = self._inject_url_context(query)
 
@@ -1437,9 +1574,11 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         description = body.get("description", "")
         if not description:
             return self._json_response({"error": "description required"}, 400)
+        if self._budget_gate():
+            return
 
         artifact_type = body.get("artifact_type", "auto")
-        models = body.get("models", ["claude", "gpt", "gemini", "deepseek"])
+        models = self._cap_models(body.get("models"), ["claude", "gpt", "gemini", "deepseek"])
         extra = body.get("extra_context", "")
         do_score = body.get("score", True)
 
@@ -1518,6 +1657,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         task = body.get("task", "")
         if not task:
             return self._json_response({"error": "task required"}, 400)
+        if self._budget_gate():
+            return
 
         trace = get_tracer().start_trace("orchestrate", task)
         get_tracer().add_step(trace.id, "thought", f"Orchestrating multi-model competition. Task: {task}")
@@ -1525,7 +1666,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         task = self._inject_url_context(task)
 
         language = body.get("language", "auto")
-        worker_models = body.get("models", ["gemini", "claude"])
+        worker_models = self._cap_models(body.get("models"), ["gemini", "claude"])
 
         cost_before = TRACKER.total_cost
 
@@ -1721,15 +1862,17 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         run_id = body.get("run_id", "")
         if not run_id:
             return self._json_response({"error": "run_id required"}, 400)
+        if not re.match(r"^[A-Za-z0-9_-]+$", run_id):
+            return self._json_response({"error": "run_id may only contain letters, digits, '_' and '-'"}, 400)
 
-        output_base = Path(f"C:/TheForge/output/{run_id}")
+        output_base = Path("C:/TheForge/output") / run_id
         manifest_path = output_base / "manifest.json"
         if not manifest_path.exists():
             return self._json_response({"error": f"Run {run_id} not found at {output_base}"}, 404)
-            
+
         trace = get_tracer().start_trace(f"deploy_{run_id}", f"Deploy Artifact {run_id}")
         get_tracer().add_step(trace.id, "thought", f"Preparing to deploy {run_id}. Checking permissions...")
-        
+
         approved = get_tracer().hitl.request_approval(
             action="Code Deployment (File System)",
             details=f"Agent wants to execute deployment logic for compiled run: {run_id}",
@@ -1739,12 +1882,17 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             get_tracer().add_step(trace.id, "observation", "Deployment blocked by operator.")
             get_tracer().finish_trace(trace.id, "failed")
             return self._json_response({"error": "Deployment rejected by Human-in-the-loop Governance"}, 403)
-            
+
         get_tracer().add_step(trace.id, "action", "Permission granted. Executing deploy payload...")
 
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             winner_data = manifest.get("winner", {})
+
+            source = winner_data.get("code")
+            if not source:
+                winner_files = list(output_base.glob("winner_*.*"))
+                source = winner_files[0].read_text(encoding="utf-8") if winner_files else ""
 
             from forge.factory import Artifact, FactoryResult
             winner = Artifact(
@@ -1752,9 +1900,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                 language=winner_data.get("language", "python"),
                 description=manifest.get("description", ""),
                 provider_name=winner_data.get("provider", "unknown"),
-                source=winner_data.get("code", manifest_path.parent.read_text() if False else
-                    next((f for ext in [".py",".ts",".go",".rs",".yml"] if (output_base / f"winner_{winner_data.get('provider','')}{ext}").exists()),
-                         None) and (list(output_base.glob(f"winner_*.*"))[0].read_text(encoding="utf-8") if list(output_base.glob("winner_*.*")) else "")),
+                source=source,
             )
             result = FactoryResult(
                 run_id=run_id,
@@ -1819,15 +1965,43 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _cors(self):
-        """CORS headers — locked to localhost for security."""
+        """CORS headers — locked to localhost; unknown origins get no ACAO (browser blocks read)."""
         origin = self.headers.get("Origin", "")
         allowed = ("http://localhost", "http://127.0.0.1")
-        if any(origin.startswith(a) for a in allowed) or not origin:
+        if not origin or any(origin.startswith(a) for a in allowed):
             self.send_header("Access-Control-Allow-Origin", origin or "*")
-        else:
-            self.send_header("Access-Control-Allow-Origin", "http://localhost:8777")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Forge-Key, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _budget_gate(self) -> bool:
+        """Return True (and send a 402 response) if the configured budget is exhausted."""
+        if TRACKER.is_exhausted:
+            self._json_response({
+                "error": "Budget exhausted — increase FORGE_BUDGET_USD or wait for the next period.",
+                "total_cost": round(TRACKER.total_cost, 6),
+                "budget_max": TRACKER.budget.max_budget_usd,
+            }, 402)
+            return True
+        return False
+
+    @staticmethod
+    def _cap_models(models, default) -> list:
+        """Bound the caller-supplied model list so one request can't fan out unbounded paid calls."""
+        if not isinstance(models, list) or not models:
+            models = default
+        return [str(m) for m in models][:MAX_MODELS_PER_REQUEST]
+
+    def _resolve_jailed_path(self, raw_path: str) -> "Path | None":
+        """Resolve a caller-supplied path and ensure it stays inside PROJECT_ROOT. Returns None if escaping."""
+        try:
+            resolved = (PROJECT_ROOT / raw_path).resolve() if not Path(raw_path).is_absolute() else Path(raw_path).resolve()
+        except Exception:
+            return None
+        try:
+            resolved.relative_to(PROJECT_ROOT)
+        except ValueError:
+            return None
+        return resolved
 
     def log_message(self, format, *args):
         """Structured request logging with timestamps."""
@@ -1861,28 +2035,36 @@ def _safe_vitalis_version() -> str:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8777
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("FORGE_PORT", "8777"))
+    # Default to loopback-only. Set FORGE_BIND_HOST=0.0.0.0 explicitly to expose
+    # this on the LAN/WAN — every /api/* route can spend money, read files, and
+    # (with FORGE_ALLOW_SHELL_EXEC) run shell commands, so only do this on a
+    # trusted network and behind the FORGE_API_KEY.
+    bind_host = os.environ.get("FORGE_BIND_HOST", "127.0.0.1")
 
     vendors = get_vendor_status()
     active_v = [k for k, v in vendors.items() if not k.startswith('_') and v.get("active")]
     ide_targets = os.environ.get("FORGE_IDE_TARGETS", "antigravity,clipboard")
     print(f"""
 ==============================================================
-  THE FORGE — Multi-Vendor Live API Server                     
-  http://localhost:{port}                                       
+  THE FORGE — Multi-Vendor Live API Server
+  http://localhost:{port}
 ==============================================================
-  Dashboard:  http://localhost:{port}/                           
-  API:        http://localhost:{port}/api/health                 
-  Models:     {len(MODELS)} registered                                    
-  Vendors:    {', '.join(active_v) or 'none configured'}                      
-  Budget:     ${TRACKER.budget.max_budget_usd:.2f} max                                      
-  Vitalis:    {_safe_vitalis_version():<20s}                          
-  IDE Bridge: {ide_targets}                          
+  Dashboard:  http://localhost:{port}/
+  API:        http://localhost:{port}/api/health
+  Models:     {len(MODELS)} registered
+  Vendors:    {', '.join(active_v) or 'none configured'}
+  Budget:     ${TRACKER.budget.max_budget_usd:.2f} max
+  Vitalis:    {_safe_vitalis_version():<20s}
+  IDE Bridge: {ide_targets}
+  Bind host:  {bind_host}{'  (!! network-reachable !!)' if bind_host not in ('127.0.0.1', 'localhost') else ''}
+  API key:    {'set via FORGE_API_KEY' if os.environ.get('FORGE_API_KEY', '').strip() else 'auto-generated, stored in .forge_key'}
+  Shell exec: {'ENABLED (FORGE_ALLOW_SHELL_EXEC=true)' if FORGE_ALLOW_SHELL_EXEC else 'disabled'}
   Tracer:     Active (Threading Mode)
 ==============================================================
     """)
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), ForgeHandler)
+    server = ThreadingHTTPServer((bind_host, port), ForgeHandler)
     global _SERVER_INSTANCE
     _SERVER_INSTANCE = server
     try:

@@ -835,9 +835,36 @@ let sessionId = 'sess_' + Date.now();
 const COLORS = {'claude-fable':'#fbbf24','claude-opus':'#f59e0b',claude:'#f97316',gpt:'#06b6d4','gpt-mini':'#0ea5e9','gpt-nano':'#38bdf8',gemini:'#8b5cf6','gemini-lite':'#a78bfa',grok:'#e11d48',deepseek:'#22c55e','qwen-local':'#fb923c'};
 
 // ══════════════════════════════════════════════════════════════
+// AUTH — every /api/* route (besides /api/auth-bootstrap itself)
+// now requires an X-Forge-Key header. The dashboard is only ever
+// served from the same loopback-bound server, so it fetches its
+// own key once on load rather than shipping it as a static secret
+// baked into this file.
+// ══════════════════════════════════════════════════════════════
+let FORGE_KEY = '';
+async function loadAuthKey() {
+  try {
+    const res = await fetch('/api/auth-bootstrap');
+    if (res.ok) { const data = await res.json(); FORGE_KEY = data.key || ''; }
+  } catch (e) { console.error('Failed to bootstrap auth key:', e); }
+}
+(function patchFetchWithAuth() {
+  const origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') !== -1 && url.indexOf('/api/auth-bootstrap') === -1) {
+      init = init || {};
+      init.headers = Object.assign({}, init.headers, { 'X-Forge-Key': FORGE_KEY });
+    }
+    return origFetch(input, init);
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════════
 async function init() {
+  await loadAuthKey();
   document.querySelectorAll('.sb-btn[data-panel]').forEach(btn => {
     btn.onclick = () => {
       document.querySelectorAll('.sb-btn').forEach(b => b.classList.remove('active'));

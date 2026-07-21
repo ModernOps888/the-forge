@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -241,14 +242,27 @@ def _load_or_default_challenge(args) -> Challenge:
     )
 
 
+def _safe_slug(name: str) -> str:
+    """Sanitize an untrusted name (may come from LLM JSON output) into a
+    filesystem-safe slug. Only [a-zA-Z0-9_-] survive; everything else
+    (including path separators like '../') is collapsed to '_'."""
+    slug = name.lower().replace(" ", "_")
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
+    return slug or "unnamed"
+
+
 def _save_results(tournament, challenge):
     if tournament.champion:
         tools_dir = Path("tools")
         tools_dir.mkdir(exist_ok=True)
-        slug = challenge.name.lower().replace(" ", "_")
+        tools_dir_resolved = tools_dir.resolve()
+        slug = _safe_slug(challenge.name)
 
         # Save champion source
         champ_path = tools_dir / f"champion_{slug}.sl"
+        if tools_dir_resolved not in champ_path.resolve().parents and champ_path.resolve() != tools_dir_resolved:
+            print(f"⚠️  Refusing to write outside tools/ directory: {champ_path}")
+            return
         champ_path.write_text(tournament.champion.source_code, encoding="utf-8")
         print(f"\n💾 Champion code → {champ_path}")
 
@@ -262,6 +276,9 @@ def _save_results(tournament, challenge):
             "champion_source": tournament.champion.source_code if tournament.champion else "",
         }
         results_path = tools_dir / f"tournament_{slug}.json"
+        if tools_dir_resolved not in results_path.resolve().parents and results_path.resolve() != tools_dir_resolved:
+            print(f"⚠️  Refusing to write outside tools/ directory: {results_path}")
+            return
         results_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(f"💾 Results     → {results_path}")
 
