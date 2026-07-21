@@ -346,7 +346,7 @@ def handle_forge_consensus(params: dict) -> dict:
         synth_prompt += f"=== {name.upper()} ===\n{ans[:1500]}\n\n"
     synth_prompt += "Synthesize into one authoritative answer. Note agreements/divergences."
 
-    synth_model = MODELS.get("gemini", "google/gemini-2.5-flash")
+    synth_model = MODELS.get("gemini-lite", "google/gemini-3.5-flash")
     synth_msgs = [
         {"role": "system", "content": "You are a synthesis agent."},
         {"role": "user", "content": synth_prompt},

@@ -719,9 +719,10 @@ fn main() -> i64 {
           <textarea id="evolveInstruction" placeholder="Describe the improvement... e.g. 'Add a /api/ping endpoint that returns {ping: pong}'" style="width:100%;min-height:80px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 18px;color:var(--tx);font-family:'Inter',sans-serif;font-size:13px;resize:vertical;outline:none;transition:border-color 0.3s;" onfocus="this.style.borderColor='var(--or)'" onblur="this.style.borderColor='var(--border)'"></textarea>
           <div style="display:flex;gap:10px;align-items:center;">
             <select id="evolveModel" style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--tx);font-size:11px;outline:none;cursor:pointer;">
-              <option value="claude-opus">Claude Opus 4.7 ⭐ Elite</option>
-              <option value="claude">Claude Sonnet (Premium)</option>
-              <option value="gemini">Gemini (Mid)</option>
+              <option value="claude-fable">Claude Fable 5 ⭐ Elite</option>
+              <option value="claude-opus">Claude Opus 4.8 (Elite)</option>
+              <option value="claude">Claude Sonnet 5 (Premium)</option>
+              <option value="gemini">Gemini 3.1 Pro (Premium)</option>
               <option value="deepseek">DeepSeek (Economy)</option>
               <option value="qwen-local">Qwen Local (Free)</option>
             </select>
@@ -831,7 +832,7 @@ const API = '';
 let selectedModel = 'gemini';
 let models = [];
 let sessionId = 'sess_' + Date.now();
-const COLORS = {'claude-opus':'#f59e0b',claude:'#f97316',gpt:'#06b6d4','gpt-mini':'#0ea5e9','gpt-nano':'#38bdf8',gemini:'#8b5cf6','gemini-lite':'#a78bfa',deepseek:'#22c55e','qwen-local':'#fb923c'};
+const COLORS = {'claude-fable':'#fbbf24','claude-opus':'#f59e0b',claude:'#f97316',gpt:'#06b6d4','gpt-mini':'#0ea5e9','gpt-nano':'#38bdf8',gemini:'#8b5cf6','gemini-lite':'#a78bfa',grok:'#e11d48',deepseek:'#22c55e','qwen-local':'#fb923c'};
 
 // ══════════════════════════════════════════════════════════════
 // INIT

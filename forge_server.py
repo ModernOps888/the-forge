@@ -1374,7 +1374,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             "Note agreements and divergences. Be precise."
         )
 
-        synth_model = MODELS.get("gemini", "google/gemini-2.5-pro")
+        synth_model = MODELS.get("gemini", "google/gemini-3.1-pro")
         messages = [
             {"role": "system", "content": "You are a synthesis agent. Merge multiple AI responses into one authoritative answer."},
             {"role": "user", "content": synth_prompt},

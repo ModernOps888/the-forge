@@ -214,17 +214,19 @@ def detect_compute_hardware() -> dict:
 # ── Model Registry ───────────────────────────────────────────────────────────
 
 MODELS = {
-    # Elite tier
-    "claude-opus": "anthropic/claude-opus-4.7",
-    # Premium tier (April 2026)
-    "claude":     "anthropic/claude-sonnet-4.6",
-    "gpt":        "openai/gpt-5.4",
-    "gemini":     "google/gemini-2.5-pro",
-    "deepseek":   "deepseek/deepseek-chat-v3-0324",
+    # Elite tier (July 2026)
+    "claude-fable": "anthropic/claude-fable-5",
+    "claude-opus":  "anthropic/claude-opus-4-8",
+    # Premium tier (July 2026)
+    "claude":     "anthropic/claude-sonnet-5",
+    "gpt":        "openai/gpt-5.6-sol",
+    "gemini":     "google/gemini-3.1-pro",
+    "grok":       "x-ai/grok-4.5",          # no direct key path — routes via OpenRouter
+    "deepseek":   "deepseek/deepseek-chat",  # evergreen alias; also valid on the direct DeepSeek API
     # Economy aliases
-    "gpt-mini":   "openai/gpt-5.4-mini",
-    "gpt-nano":   "openai/gpt-5.4-nano",
-    "gemini-lite": "google/gemini-2.5-flash",
+    "gpt-mini":   "openai/gpt-5.6-terra",
+    "gpt-nano":   "openai/gpt-5.6-luna",
+    "gemini-lite": "google/gemini-3.5-flash",
     # Local models (run via Ollama — GPU, CPU, or Apple Silicon)
     "qwen-local":    "qwen2.5-coder:7b",
     "llama-local":   "llama3.2:latest",
@@ -234,11 +236,11 @@ MODELS = {
 }
 
 MODEL_TIERS = {
-    "cheap":   ["gemini", "deepseek", "gpt-nano", "gemini-lite",
+    "cheap":   ["gemini-lite", "deepseek", "gpt-nano",
                 "qwen-local", "llama-local", "codellama", "mistral-local", "phi-local"],
     "mid":     ["gpt-mini"],
-    "premium": ["claude", "gpt"],
-    "elite":   ["claude-opus"],
+    "premium": ["claude", "gpt", "gemini", "grok"],
+    "elite":   ["claude-fable", "claude-opus"],
 }
 
 
@@ -439,10 +441,11 @@ def call_anthropic(
     # Strip the vendor prefix for the Anthropic API
     bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
 
+    # Claude 5-family / Opus 4.7+ reject sampling params (temperature/top_p → 400),
+    # so the direct Anthropic path never sends them; steering is prompt-only.
     body = {
         "model": bare_model,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "messages": api_messages,
     }
     if system_text.strip():
@@ -923,7 +926,7 @@ def make_all_providers() -> dict[str, object]:
 
 # ── Multi-Agent Chat ──────────────────────────────────────────────────────────
 
-def chat(query: str, model_name: str = "gemini", history: list[dict] | None = None) -> str:
+def chat(query: str, model_name: str = "gemini-lite", history: list[dict] | None = None) -> str:
     """
     Send a chat message to a single model. Returns the response.
     Cheapest model by default for cost efficiency.
@@ -989,7 +992,7 @@ def consensus(query: str, models: list[str] | None = None) -> dict:
         "Note where models agree and where they diverge. Be precise."
     )
 
-    synth_model = MODELS.get("gemini", "google/gemini-2.5-pro")  # used for synthesis
+    synth_model = MODELS.get("gemini", "google/gemini-3.1-pro")  # used for synthesis
     messages = [
         {"role": "system", "content": "You are a synthesis agent. Merge multiple AI responses into one authoritative answer."},
         {"role": "user", "content": synthesis_prompt},
@@ -1024,7 +1027,7 @@ def auto_route(query: str, complexity: str = "auto") -> str:
             complexity = "simple"
 
     if complexity == "simple":
-        model = "gemini"      # cheapest cloud model
+        model = "gemini-lite"  # cheapest cloud model
     elif complexity == "medium":
         model = "gpt-mini"    # mid-tier
     else:

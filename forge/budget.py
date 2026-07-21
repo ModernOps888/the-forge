@@ -26,17 +26,19 @@ from . import compiler as _c     # hotpath EMA for trend tracking
 # ── OpenRouter Pricing ($ per 1M tokens) ─────────────────────────────────────
 
 PRICING = {
-    # Elite tier (April 2026)
-    "anthropic/claude-opus-4.7":    {"input": 15.00, "output": 75.00},
-    # Premium tier (April 2026)
-    "anthropic/claude-sonnet-4.6":  {"input": 3.00, "output": 15.00},
-    "openai/gpt-5.4":               {"input": 2.50, "output": 20.00},
-    "google/gemini-2.5-pro":        {"input": 1.25, "output": 10.00},
-    "deepseek/deepseek-chat-v3-0324":{"input": 0.27, "output": 1.10},
+    # Elite tier (July 2026)
+    "anthropic/claude-fable-5":     {"input": 10.00, "output": 50.00},
+    "anthropic/claude-opus-4-8":    {"input": 5.00, "output": 25.00},
+    # Premium tier (July 2026)
+    "anthropic/claude-sonnet-5":    {"input": 3.00, "output": 15.00},
+    "openai/gpt-5.6-sol":           {"input": 3.00, "output": 24.00},
+    "google/gemini-3.1-pro":        {"input": 2.00, "output": 12.00},
+    "x-ai/grok-4.5":                {"input": 3.00, "output": 15.00},
+    "deepseek/deepseek-chat":       {"input": 0.27, "output": 1.10},
     # Economy tier
-    "openai/gpt-5.4-mini":          {"input": 0.40, "output": 1.60},
-    "openai/gpt-5.4-nano":          {"input": 0.10, "output": 0.40},
-    "google/gemini-2.5-flash":      {"input": 0.30, "output": 2.50},
+    "openai/gpt-5.6-terra":         {"input": 0.60, "output": 2.40},
+    "openai/gpt-5.6-luna":          {"input": 0.15, "output": 0.60},
+    "google/gemini-3.5-flash":      {"input": 0.30, "output": 2.50},
     # Local SLM (free — runs on local GPU via Ollama)
     "qwen2.5-coder:7b":             {"input": 0.00, "output": 0.00},
 }

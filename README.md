@@ -462,7 +462,7 @@ result = consensus("Compare actor model vs CSP for Go concurrency")
 from forge import auto_route
 
 # Automatically picks cheapest model that can handle the task
-answer = auto_route("What's 2+2?")           # → Gemini (cheapest)
+answer = auto_route("What's 2+2?")           # → Gemini Flash (cheapest)
 answer = auto_route("Design a payment API")   # → Claude (premium)
 ```
 
@@ -470,17 +470,23 @@ answer = auto_route("Design a payment API")   # → Claude (premium)
 
 ## 🔧 Model Registry & Multi-Vendor Routing
 
+Frontier model matrix as of **July 2026**:
+
 | Name | Model ID | Tier | Routing |
 |------|----------|------|--------|
-| `claude` | `anthropic/claude-sonnet-4.6` | Premium | Direct → OpenRouter fallback |
-| `claude-opus` | `anthropic/claude-opus-4.7` | Elite | Direct → OpenRouter fallback |
-| `gpt` | `openai/gpt-5.4` | Premium | Direct → OpenRouter fallback |
-| `gpt-mini` | `openai/gpt-5.4-mini` | Mid | Direct → OpenRouter fallback |
-| `gpt-nano` | `openai/gpt-5.4-nano` | Economy | Direct → OpenRouter fallback |
-| `gemini` | `google/gemini-2.5-pro` | Premium | Direct → OpenRouter fallback |
-| `gemini-lite` | `google/gemini-2.5-flash` | Economy | Direct → OpenRouter fallback |
-| `deepseek` | `deepseek/deepseek-chat-v3-0324` | Economy | Direct → OpenRouter fallback |
+| `claude-fable` | `anthropic/claude-fable-5` | Elite | Direct → OpenRouter fallback |
+| `claude-opus` | `anthropic/claude-opus-4-8` | Elite | Direct → OpenRouter fallback |
+| `claude` | `anthropic/claude-sonnet-5` | Premium | Direct → OpenRouter fallback |
+| `gpt` | `openai/gpt-5.6-sol` | Premium | Direct → OpenRouter fallback |
+| `gemini` | `google/gemini-3.1-pro` | Premium | Direct → OpenRouter fallback |
+| `grok` | `x-ai/grok-4.5` | Premium | OpenRouter |
+| `gpt-mini` | `openai/gpt-5.6-terra` | Mid | Direct → OpenRouter fallback |
+| `gpt-nano` | `openai/gpt-5.6-luna` | Economy | Direct → OpenRouter fallback |
+| `gemini-lite` | `google/gemini-3.5-flash` | Economy | Direct → OpenRouter fallback |
+| `deepseek` | `deepseek/deepseek-chat` | Economy | Direct → OpenRouter fallback |
 | `qwen-local` | `qwen2.5-coder:7b` | Local | Ollama (GPU/CPU/Split) |
+
+> **Note on the Claude 5 family:** direct Anthropic calls to Claude Sonnet 5 / Opus 4.8 / Fable 5 no longer send sampling parameters (`temperature` is rejected with a 400 on these models) — steering is prompt-only. Claude Mythos 5 (`anthropic/claude-mythos-5`) shares Fable 5's capabilities but is gated behind Project Glasswing, so it isn't registered by default.
 
 ### Smart Routing
 
@@ -641,7 +647,15 @@ TheForge/
 
 MIT License — see [LICENSE](LICENSE) for details.
 
-## 🔧 Recent Changes (v2.1 — Hardening)
+## 🔧 Recent Changes (v2.2 — July 2026 Model Refresh)
+
+- **Model registry refresh** — Elite tier now leads with **Claude Fable 5** and **Claude Opus 4.8**; premium tier moves to **Claude Sonnet 5**, **GPT-5.6 Sol**, and **Gemini 3.1 Pro**; economy tier moves to **GPT-5.6 Terra/Luna** and **Gemini 3.5 Flash**. **Grok 4.5** joins via OpenRouter.
+- **Pricing table update** — July 2026 rates: Fable 5 $10/$50, Opus 4.8 $5/$25 (down from Opus 4.7's $15/$75), Sonnet 5 $3/$15 per MTok.
+- **Direct Anthropic fix** — model IDs now use the dash format the Anthropic API expects (`claude-sonnet-5`, not `claude-sonnet-4.6`), and `temperature` is no longer sent (rejected with a 400 on the Claude 5 family / Opus 4.7+).
+- **Direct DeepSeek fix** — `deepseek` alias now maps to the evergreen `deepseek-chat` ID, which is valid on both OpenRouter and the direct DeepSeek API (the pinned `-v3-0324` slug was OpenRouter-only).
+- **Cheap-path routing** — `auto_route()` simple queries, artifact scoring, and MCP synthesis now use `gemini-lite` (Gemini 3.5 Flash) instead of the now-premium `gemini` alias.
+
+## 🔧 Previous Changes (v2.1 — Hardening)
 
 - **Persistent Provenance Chain** — `ProvenanceChain` now supports `save_to_disk()` / `load_from_disk()` with atomic write-then-rename. The immutable audit ledger is no longer lost on server restart.
 - **Thread-Safe Circuit Breaker** — All `CircuitBreaker` state mutations are now protected by `threading.Lock()`, fixing potential corruption under `ThreadingHTTPServer` concurrent request handling.

@@ -385,7 +385,7 @@ def build(
 
 def _score_artifacts(artifacts: list[Artifact]) -> None:
     """LLM-score each artifact using gemini (cheapest)."""
-    scorer_model = MODELS.get("gemini", "google/gemini-2.5-flash")
+    scorer_model = MODELS.get("gemini-lite", "google/gemini-3.5-flash")
 
     for art in artifacts:
         if not art.source or len(art.source) < 20:
