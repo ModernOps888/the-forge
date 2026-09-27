@@ -498,23 +498,28 @@ answer = auto_route("Design a payment API")   # → Claude (premium)
 
 ## 🔧 Model Registry & Multi-Vendor Routing
 
-Frontier model matrix as of **July 2026**:
+Frontier and open-weight model matrix:
 
 | Name | Model ID | Tier | Routing |
 |------|----------|------|--------|
 | `claude-fable` | `anthropic/claude-fable-5` | Elite | Direct → OpenRouter fallback |
+| `claude-mythos` | `anthropic/claude-mythos-5` | Elite | Direct → OpenRouter fallback |
 | `claude-opus` | `anthropic/claude-opus-4-8` | Elite | Direct → OpenRouter fallback |
 | `claude` | `anthropic/claude-sonnet-5` | Premium | Direct → OpenRouter fallback |
+| `claude-3-7-sonnet` | `anthropic/claude-3-7-sonnet` | Premium | Direct → OpenRouter fallback |
 | `gpt` | `openai/gpt-5.6-sol` | Premium | Direct → OpenRouter fallback |
 | `gemini` | `google/gemini-3.1-pro` | Premium | Direct → OpenRouter fallback |
 | `grok` | `x-ai/grok-4.5` | Premium | OpenRouter |
+| `deepseek-r1` | `deepseek/deepseek-reasoner` | Premium | Direct → OpenRouter fallback |
+| `o3-mini` | `openai/o3-mini` | Premium | Direct → OpenRouter fallback |
 | `gpt-mini` | `openai/gpt-5.6-terra` | Mid | Direct → OpenRouter fallback |
+| `llama-3.3` | `meta-llama/llama-3.3-70b-instruct` | Mid | OpenRouter / Ollama |
 | `gpt-nano` | `openai/gpt-5.6-luna` | Economy | Direct → OpenRouter fallback |
 | `gemini-lite` | `google/gemini-3.5-flash` | Economy | Direct → OpenRouter fallback |
 | `deepseek` | `deepseek/deepseek-chat` | Economy | Direct → OpenRouter fallback |
 | `qwen-local` | `qwen2.5-coder:7b` | Local | Ollama (GPU/CPU/Split) |
 
-> **Note on the Claude 5 family:** direct Anthropic calls to Claude Sonnet 5 / Opus 4.8 / Fable 5 no longer send sampling parameters (`temperature` is rejected with a 400 on these models) — steering is prompt-only. Claude Mythos 5 (`anthropic/claude-mythos-5`) shares Fable 5's capabilities but is gated behind Project Glasswing, so it isn't registered by default.
+> **Note on the Claude 5 family:** direct Anthropic calls to Claude Sonnet 5 / Opus 4.8 / Fable 5 / Mythos 5 no longer send sampling parameters (`temperature` is rejected with a 400 on these models) — steering is prompt-only. Support for extended reasoning is enabled across Claude 3.7 Sonnet, DeepSeek R1, and o3-mini.
 
 ### Smart Routing
 

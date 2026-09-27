@@ -214,19 +214,24 @@ def detect_compute_hardware() -> dict:
 # ── Model Registry ───────────────────────────────────────────────────────────
 
 MODELS = {
-    # Elite tier (July 2026)
-    "claude-fable": "anthropic/claude-fable-5",
-    "claude-opus":  "anthropic/claude-opus-4-8",
-    # Premium tier (July 2026)
-    "claude":     "anthropic/claude-sonnet-5",
-    "gpt":        "openai/gpt-5.6-sol",
-    "gemini":     "google/gemini-3.1-pro",
-    "grok":       "x-ai/grok-4.5",          # no direct key path — routes via OpenRouter
-    "deepseek":   "deepseek/deepseek-chat",  # evergreen alias; also valid on the direct DeepSeek API
-    # Economy aliases
-    "gpt-mini":   "openai/gpt-5.6-terra",
-    "gpt-nano":   "openai/gpt-5.6-luna",
+    # Elite tier
+    "claude-fable":  "anthropic/claude-fable-5",
+    "claude-mythos": "anthropic/claude-mythos-5",
+    "claude-opus":   "anthropic/claude-opus-4-8",
+    # Premium tier
+    "claude":            "anthropic/claude-sonnet-5",
+    "claude-3-7-sonnet": "anthropic/claude-3-7-sonnet",
+    "gpt":               "openai/gpt-5.6-sol",
+    "gemini":            "google/gemini-3.1-pro",
+    "grok":              "x-ai/grok-4.5",          # no direct key path — routes via OpenRouter
+    "deepseek":          "deepseek/deepseek-chat",  # evergreen alias; also valid on the direct DeepSeek API
+    "deepseek-r1":       "deepseek/deepseek-reasoner",
+    "o3-mini":           "openai/o3-mini",
+    # Economy / Mid aliases
+    "gpt-mini":    "openai/gpt-5.6-terra",
+    "gpt-nano":    "openai/gpt-5.6-luna",
     "gemini-lite": "google/gemini-3.5-flash",
+    "llama-3.3":   "meta-llama/llama-3.3-70b-instruct",
     # Local models (run via Ollama — GPU, CPU, or Apple Silicon)
     "qwen-local":    "qwen2.5-coder:7b",
     "llama-local":   "llama3.2:latest",
@@ -238,9 +243,9 @@ MODELS = {
 MODEL_TIERS = {
     "cheap":   ["gemini-lite", "deepseek", "gpt-nano",
                 "qwen-local", "llama-local", "codellama", "mistral-local", "phi-local"],
-    "mid":     ["gpt-mini"],
-    "premium": ["claude", "gpt", "gemini", "grok"],
-    "elite":   ["claude-fable", "claude-opus"],
+    "mid":     ["gpt-mini", "llama-3.3"],
+    "premium": ["claude", "claude-3-7-sonnet", "gpt", "gemini", "grok", "deepseek-r1", "o3-mini"],
+    "elite":   ["claude-fable", "claude-mythos", "claude-opus"],
 }
 
 
