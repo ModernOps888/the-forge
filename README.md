@@ -9,10 +9,15 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 [![Multi-Vendor](https://img.shields.io/badge/LLMs-Multi_Vendor-6366f1?style=for-the-badge)](https://openrouter.ai)
 [![Cross-Platform](https://img.shields.io/badge/Platform-Win_Linux_Mac-22c55e?style=for-the-badge)](#-compute--hardware)
+[![Enterprise-Audits](https://img.shields.io/badge/Enterprise-Security_Audits-ff00e5?style=for-the-badge)](https://infinitytechstack.uk/consulting)
 
 **Multiple LLMs compete to solve coding challenges.<br>
 The Vitalis compiler is the impartial judge.<br>
 Evolution breeds the winners into code no single model could write.**
+
+<br>
+
+> 🛡️ **Enterprise Multi-Agent Architecture & Security Audits**: Scaling multi-agent swarms or autonomous agent pipelines in production? We provide **fixed-scope, 3-day enterprise agent security audits** (£4,500 with runnable remediation PRs) and **sovereign AI architecture advisory** (£650–£7,500). [**Explore Packages & Inquire →**](https://infinitytechstack.uk/consulting)
 
 <br>
 
