@@ -19,8 +19,32 @@ class Provider(str, Enum):
     CLAUDE = "claude"
     GPT = "gpt"
     GEMINI = "gemini"
-    LOCAL = "local"          # locally-generated (evolution engine)
+    DEEPSEEK = "deepseek"
+    GROK = "grok"
+    META = "meta"
+    LOCAL = "local"          # locally-generated (evolution engine / Ollama)
     HUMAN = "human"          # human-submitted
+
+    @classmethod
+    def from_name(cls, name: str) -> "Provider":
+        """Map any provider alias (e.g. 'claude-fable', 'gpt-mini', 'o3-mini', 'deepseek-r1') to a Provider enum."""
+        n = (name or "").lower()
+        for p in cls:
+            if n == p.value:
+                return p
+        if n.startswith("claude"):
+            return cls.CLAUDE
+        if n.startswith(("gpt", "o1", "o3", "o4")):
+            return cls.GPT
+        if n.startswith("gemini"):
+            return cls.GEMINI
+        if n.startswith("deepseek"):
+            return cls.DEEPSEEK
+        if n.startswith("grok"):
+            return cls.GROK
+        if n.startswith("llama") and not n.endswith("-local"):
+            return cls.META
+        return cls.LOCAL
 
 
 class CompilationGate(str, Enum):

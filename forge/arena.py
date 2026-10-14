@@ -181,7 +181,7 @@ class Arena:
 
         tournament = Tournament(
             challenge=challenge,
-            providers=[Provider(n) if n in [p.value for p in Provider] else Provider.LOCAL for n in self.providers],
+            providers=[Provider.from_name(n) for n in self.providers],
             max_generations=self.config.max_generations,
             population_size=self.config.population_size,
             elite_count=self.config.elite_count,
@@ -297,7 +297,7 @@ class Arena:
                 sub = Submission(
                     challenge_id=challenge.id,
                     generation=0,
-                    provider=Provider(pname) if pname in [p.value for p in Provider] else Provider.LOCAL,
+                    provider=Provider.from_name(pname),
                     source_code=source,
                     status=SubmissionStatus.PENDING,
                 )

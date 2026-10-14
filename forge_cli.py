@@ -24,7 +24,11 @@ from pathlib import Path
 
 from forge import Arena, ArenaConfig, Challenge, compile_and_run, type_check, lex
 from forge.arena import mock_provider
-from forge.providers import openrouter_provider, ollama_provider, MODELS, test_provider, chat, multi_agent_research, consensus, auto_route, call_openrouter
+from forge.providers import (
+    openrouter_provider, ollama_provider, MODELS, test_provider,
+    chat, multi_agent_research, consensus, auto_route,
+    call_model, call_openrouter, _is_local_model, get_vendor_status,
+)
 from forge.budget import get_tracker, BudgetConfig
 from forge.factory import build as factory_build, ARTIFACT_TYPES
 from forge.marketplace import get_marketplace
@@ -37,22 +41,27 @@ BANNER = r"""
 """
 
 
+def _require_provider_key(models: list[str] | None = None) -> None:
+    """Ensure at least one cloud API key is configured (unless all requested models are local)."""
+    if models and all(_is_local_model(m) for m in models):
+        return
+    if os.environ.get("OPENROUTER_API_KEY", ""):
+        return
+    status = get_vendor_status()
+    if any(v.get("active") for k, v in status.items() if k not in ("ollama", "_compute")):
+        return
+    print("❌ No cloud LLM API key configured. Set OPENROUTER_API_KEY or a direct vendor key")
+    print("   (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_AI_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY).")
+    sys.exit(1)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# ARENA — Real LLM tournament via OpenRouter
+# ARENA — Real LLM tournament via Smart Routing
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def cmd_arena(args):
-    """Run a real tournament with actual LLM providers via OpenRouter."""
+    """Run a real tournament with actual LLM providers via Smart Routing."""
     print(BANNER)
-
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("❌ OPENROUTER_API_KEY not set. Run:")
-        print('   $env:OPENROUTER_API_KEY = "sk-or-v1-..."')
-        sys.exit(1)
-
-    print(f"🔥 LIVE TOURNAMENT — Real LLMs via OpenRouter")
-    print(f"   Available models: {', '.join(MODELS.keys())}\n")
 
     # Parse models
     model_names = [m.strip() for m in args.models.split(",")]
@@ -60,6 +69,11 @@ def cmd_arena(args):
         if m not in MODELS:
             print(f"⚠️  Unknown model '{m}', available: {list(MODELS.keys())}")
             sys.exit(1)
+
+    _require_provider_key(model_names)
+
+    print(f"🔥 LIVE TOURNAMENT — Real LLMs via Smart Routing")
+    print(f"   Available models: {', '.join(MODELS.keys())}\n")
 
     challenge = _load_or_default_challenge(args)
 
@@ -74,7 +88,7 @@ def cmd_arena(args):
     # Register REAL providers
     for name in model_names:
         print(f"   Registering: {name} → {MODELS[name]}")
-        provider_fn = ollama_provider(name) if name.endswith("-local") else openrouter_provider(name)
+        provider_fn = ollama_provider(name) if _is_local_model(name) else openrouter_provider(name)
         arena.register_provider(name, provider_fn)
 
     print()
@@ -134,14 +148,10 @@ def cmd_demo(args):
 def cmd_test_providers(args):
     """Smoke-test: ask each model to write a simple function, then compile it."""
     print(BANNER)
-    print("🧪 Testing real LLM providers via OpenRouter...\n")
-
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("❌ OPENROUTER_API_KEY not set")
-        sys.exit(1)
+    print("🧪 Testing real LLM providers via Smart Routing...\n")
 
     model_names = [m.strip() for m in args.models.split(",")]
+    _require_provider_key(model_names)
 
     for name in model_names:
         model_id = MODELS.get(name, name)
@@ -149,7 +159,7 @@ def cmd_test_providers(args):
         print(f"  🤖 {name} ({model_id})")
 
         try:
-            provider = ollama_provider(name) if name.endswith("-local") else openrouter_provider(name)
+            provider = ollama_provider(name) if _is_local_model(name) else openrouter_provider(name)
             t0 = time.time()
             source = provider(
                 "Write a function that adds two integers",
@@ -290,11 +300,9 @@ def _save_results(tournament, challenge):
 def cmd_chat(args):
     """Interactive chat with any LLM, cost-tracked."""
     print(BANNER)
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("❌ OPENROUTER_API_KEY not set"); sys.exit(1)
-
     model = args.model
+    _require_provider_key([model])
+
     tracker = get_tracker(BudgetConfig(max_budget_usd=args.budget))
     print(f"💬 Chat mode — model: {model} ({MODELS.get(model, model)})")
     print(f"💰 Budget: ${args.budget:.2f}  │  Type 'quit' to exit, 'switch <model>' to change")
@@ -347,12 +355,10 @@ def cmd_chat(args):
 def cmd_research(args):
     """Send a research query to multiple models."""
     print(BANNER)
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("❌ OPENROUTER_API_KEY not set"); sys.exit(1)
+    model_names = [m.strip() for m in args.models.split(",")]
+    _require_provider_key(model_names)
 
     tracker = get_tracker(BudgetConfig(max_budget_usd=args.budget))
-    model_names = [m.strip() for m in args.models.split(",")]
 
     print(f"🔬 Multi-Agent Research")
     print(f"   Query: {args.query}")
@@ -378,12 +384,10 @@ def cmd_research(args):
 def cmd_consensus(args):
     """Ask all models, then synthesize into one answer."""
     print(BANNER)
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("❌ OPENROUTER_API_KEY not set"); sys.exit(1)
+    model_names = [m.strip() for m in args.models.split(",")]
+    _require_provider_key(model_names)
 
     tracker = get_tracker(BudgetConfig(max_budget_usd=args.budget))
-    model_names = [m.strip() for m in args.models.split(",")]
 
     print(f"🧠 Multi-Agent Consensus")
     print(f"   Query: {args.query}")
@@ -457,10 +461,7 @@ def cmd_build(args):
 def cmd_orchestrate(args):
     """Use a Master LLM to design a challenge, then let local SLMs solve it."""
     print(BANNER)
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("❌ OPENROUTER_API_KEY not set for orchestrator")
-        sys.exit(1)
+    _require_provider_key(["claude"])
 
     print(f"🧠 Master Orchestrator: Planning challenge...")
     print(f"   Task: {args.task}")
@@ -483,10 +484,11 @@ def cmd_orchestrate(args):
     )
 
     try:
-        content, _ = call_openrouter(
+        content, _ = call_model(
             MODELS["claude"],
             [{"role": "user", "content": prompt}],
             max_tokens=1500,
+            provider_name="claude",
             purpose="orchestrate"
         )
         content = content.replace("```json", "").replace("```", "").strip()
@@ -514,7 +516,7 @@ def cmd_orchestrate(args):
     # Master orchestrator deploys SLM workers (default: qwen-local)
     model_names = [m.strip() for m in args.models.split(",")]
     for name in model_names:
-        provider_fn = ollama_provider(name) if name.endswith("-local") else openrouter_provider(name)
+        provider_fn = ollama_provider(name) if _is_local_model(name) else openrouter_provider(name)
         arena.register_provider(name, provider_fn)
 
     tournament = arena.run(challenge)

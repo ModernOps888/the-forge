@@ -75,12 +75,12 @@ if ($ollamaUp) {
 Write-Host "  [4/6] Starting Forge server & Desktop App..." -ForegroundColor Cyan
 
 # Register context menus first
-Start-Process -FilePath "python" -ArgumentList "c:\TheForge\forge_desktop.py --register" -WorkingDirectory "c:\TheForge" -WindowStyle Hidden -Wait
+Start-Process -FilePath "python" -ArgumentList "`"$PSScriptRoot\forge_desktop.py`" --register" -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -Wait
 
-$serverProc = Start-Process -FilePath "python" -ArgumentList "c:\TheForge\forge_server.py" -WorkingDirectory "c:\TheForge" -WindowStyle Hidden -PassThru
+$serverProc = Start-Process -FilePath "python" -ArgumentList "`"$PSScriptRoot\forge_server.py`"" -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
 Write-Host "        Server PID:  $($serverProc.Id)" -ForegroundColor DarkGray
 
-$desktopProc = Start-Process -FilePath "python" -ArgumentList "c:\TheForge\forge_desktop.py --tray" -WorkingDirectory "c:\TheForge" -WindowStyle Hidden -PassThru
+$desktopProc = Start-Process -FilePath "python" -ArgumentList "`"$PSScriptRoot\forge_desktop.py`" --tray" -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
 Write-Host "        Desktop PID: $($desktopProc.Id)" -ForegroundColor DarkGray
 
 # Step 5: Wait for API health
@@ -125,7 +125,7 @@ if ($healthy) {
 } else {
     Write-Host ""
     Write-Host "   FAILED - Server did not respond after 25 attempts" -ForegroundColor Red
-    Write-Host "   Check logs: python c:\TheForge\forge_server.py" -ForegroundColor Red
+    Write-Host "   Check logs: python `"$PSScriptRoot\forge_server.py`"" -ForegroundColor Red
     Write-Host ""
     exit 1
 }

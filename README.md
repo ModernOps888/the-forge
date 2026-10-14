@@ -132,10 +132,10 @@ python forge_cli.py compile "fn main() -> i64 { 42 }"
 python forge_cli.py check "fn main() -> i64 { 42 }"
 
 # Run a full tournament from a challenge file
-python forge_cli.py challenge challenges/sort_integers.json --generations 20
+python forge_cli.py arena --challenge challenges/sort_integers.json --generations 20
 
-# Chat with any model
-python forge_cli.py chat "Explain quicksort in Vitalis .sl" --model claude
+# Interactive chat with any model
+python forge_cli.py chat --model claude
 
 # Multi-agent research (all models answer, then synthesize)
 python forge_cli.py consensus "Best practices for Rust error handling"
@@ -503,28 +503,35 @@ answer = auto_route("Design a payment API")   # → Claude (premium)
 
 ## 🔧 Model Registry & Multi-Vendor Routing
 
-Frontier and open-weight model matrix:
+October 2026 frontier and open-weight model matrix:
 
 | Name | Model ID | Tier | Routing |
 |------|----------|------|--------|
-| `claude-fable` | `anthropic/claude-fable-5` | Elite | Direct → OpenRouter fallback |
-| `claude-mythos` | `anthropic/claude-mythos-5` | Elite | Direct → OpenRouter fallback |
-| `claude-opus` | `anthropic/claude-opus-4-8` | Elite | Direct → OpenRouter fallback |
-| `claude` | `anthropic/claude-sonnet-5` | Premium | Direct → OpenRouter fallback |
-| `claude-3-7-sonnet` | `anthropic/claude-3-7-sonnet` | Premium | Direct → OpenRouter fallback |
-| `gpt` | `openai/gpt-5.6-sol` | Premium | Direct → OpenRouter fallback |
-| `gemini` | `google/gemini-3.1-pro` | Premium | Direct → OpenRouter fallback |
-| `grok` | `x-ai/grok-4.5` | Premium | OpenRouter |
-| `deepseek-r1` | `deepseek/deepseek-reasoner` | Premium | Direct → OpenRouter fallback |
+| `claude-fable` | `anthropic/claude-fable-5-1` | Ultra / Elite | Direct → OpenRouter fallback |
+| `claude-mythos` | `anthropic/claude-mythos-5` | Ultra / Elite | Direct → OpenRouter fallback |
+| `claude-opus` | `anthropic/claude-opus-5-5` | Ultra / Elite | Direct → OpenRouter fallback |
+| `claude` | `anthropic/claude-sonnet-5-5` | Premium | Direct → OpenRouter fallback |
+| `gpt` | `openai/gpt-6-astra` | Premium | Direct → OpenRouter fallback |
+| `gpt-sol` | `openai/gpt-6.1-sol` | Premium | Direct → OpenRouter fallback |
+| `gemini` | `google/gemini-4-argon` | Premium | Direct → OpenRouter fallback |
+| `gemini-pro` | `google/gemini-3.8-pro` | Premium | Direct → OpenRouter fallback |
+| `grok` | `x-ai/grok-4.7` | Premium | Direct (`XAI_API_KEY`) → OpenRouter fallback |
+| `deepseek-r1` | `deepseek/deepseek-r1` | Premium | Direct → OpenRouter fallback |
+| `o3` | `openai/o3` | Premium | Direct → OpenRouter fallback |
 | `o3-mini` | `openai/o3-mini` | Premium | Direct → OpenRouter fallback |
-| `gpt-mini` | `openai/gpt-5.6-terra` | Mid | Direct → OpenRouter fallback |
-| `llama-3.3` | `meta-llama/llama-3.3-70b-instruct` | Mid | OpenRouter / Ollama |
-| `gpt-nano` | `openai/gpt-5.6-luna` | Economy | Direct → OpenRouter fallback |
-| `gemini-lite` | `google/gemini-3.5-flash` | Economy | Direct → OpenRouter fallback |
-| `deepseek` | `deepseek/deepseek-chat` | Economy | Direct → OpenRouter fallback |
+| `claude-haiku` | `anthropic/claude-haiku-5-5` | Fast / Economy | Direct → OpenRouter fallback |
+| `gpt-mini` | `openai/gpt-5` | Fast / Economy | Direct → OpenRouter fallback |
+| `gpt-nano` | `openai/o3-mini` | Fast / Economy | Direct → OpenRouter fallback |
+| `gemini-lite` | `google/gemini-3.8-flash` | Fast / Economy | Direct → OpenRouter fallback |
+| `deepseek` | `deepseek/deepseek-chat` | Fast / Economy | Direct → OpenRouter fallback |
+| `llama-3.3` | `meta-llama/llama-3.3-70b-instruct` | Fast / Economy | OpenRouter / Ollama |
 | `qwen-local` | `qwen2.5-coder:7b` | Local | Ollama (GPU/CPU/Split) |
+| `llama-local` | `llama3.2:latest` | Local | Ollama (GPU/CPU/Split) |
+| `codellama` | `codellama:7b` | Local | Ollama (GPU/CPU/Split) |
+| `mistral-local` | `mistral:latest` | Local | Ollama (GPU/CPU/Split) |
+| `phi-local` | `phi3:mini` | Local | Ollama (GPU/CPU/Split) |
 
-> **Note on the Claude 5 family:** direct Anthropic calls to Claude Sonnet 5 / Opus 4.8 / Fable 5 / Mythos 5 no longer send sampling parameters (`temperature` is rejected with a 400 on these models) — steering is prompt-only. Support for extended reasoning is enabled across Claude 3.7 Sonnet, DeepSeek R1, and o3-mini.
+> **Note on reasoning & frontier models:** direct Anthropic calls to the Claude 5.x family omit sampling parameters (`temperature` is rejected with a 400 on these models) — steering is prompt-only. Direct OpenAI calls to `o1`/`o3`/`o4` reasoning models automatically send `max_completion_tokens` and omit `temperature`.
 
 ### Smart Routing
 
@@ -586,7 +593,7 @@ The Forge doesn't use vibes. Every comparison uses proper statistics:
 ## 📁 Project Structure
 
 ```
-TheForge/
+the-forge/
 ├── forge/
 │   ├── __init__.py           # Package exports (v2.0.0)
 │   ├── models.py             # Data models (Challenge, Submission, Score, etc.)
@@ -659,7 +666,7 @@ TheForge/
 - [x] CLI with demo mode
 - [x] Vitalis JIT integration with native Rust hotpaths
 - [x] Real LLM providers via OpenRouter (Claude, GPT, Gemini, DeepSeek)
-- [x] **Multi-vendor smart routing** (direct Anthropic/OpenAI/Google/DeepSeek + OpenRouter fallback)
+- [x] **Multi-vendor smart routing** (direct Anthropic/OpenAI/Google/DeepSeek/xAI + OpenRouter fallback)
 - [x] **Cross-platform compute detection** (NVIDIA, AMD ROCm, Apple Silicon, CPU-only)
 - [x] **IDE-agnostic export bridge** (VS Code, Cursor, Windsurf, Antigravity, clipboard)
 - [x] Budget & cost tracking with EMA spike detection
@@ -685,21 +692,12 @@ TheForge/
 
 MIT License — see [LICENSE](LICENSE) for details.
 
-## 🔧 Recent Changes (v2.2 — July 2026 Model Refresh)
+## 🔧 Recent Changes (v2.3 — October 2026 Frontier Model Horizon & Hardening)
 
-- **Model registry refresh** — Elite tier now leads with **Claude Fable 5** and **Claude Opus 4.8**; premium tier moves to **Claude Sonnet 5**, **GPT-5.6 Sol**, and **Gemini 3.1 Pro**; economy tier moves to **GPT-5.6 Terra/Luna** and **Gemini 3.5 Flash**. **Grok 4.5** joins via OpenRouter.
-- **Pricing table update** — July 2026 rates: Fable 5 $10/$50, Opus 4.8 $5/$25 (down from Opus 4.7's $15/$75), Sonnet 5 $3/$15 per MTok.
-- **Direct Anthropic fix** — model IDs now use the dash format the Anthropic API expects (`claude-sonnet-5`, not `claude-sonnet-4.6`), and `temperature` is no longer sent (rejected with a 400 on the Claude 5 family / Opus 4.7+).
-- **Direct DeepSeek fix** — `deepseek` alias now maps to the evergreen `deepseek-chat` ID, which is valid on both OpenRouter and the direct DeepSeek API (the pinned `-v3-0324` slug was OpenRouter-only).
-- **Cheap-path routing** — `auto_route()` simple queries, artifact scoring, and MCP synthesis now use `gemini-lite` (Gemini 3.5 Flash) instead of the now-premium `gemini` alias.
-
-## 🔧 Previous Changes (v2.1 — Hardening)
-
-- **Persistent Provenance Chain** — `ProvenanceChain` now supports `save_to_disk()` / `load_from_disk()` with atomic write-then-rename. The immutable audit ledger is no longer lost on server restart.
-- **Thread-Safe Circuit Breaker** — All `CircuitBreaker` state mutations are now protected by `threading.Lock()`, fixing potential corruption under `ThreadingHTTPServer` concurrent request handling.
-- **DRY Vendor Callers** — Extracted `_call_openai_compatible()` shared helper, eliminating ~180 lines of copy-paste between OpenAI, Google, and DeepSeek callers. Anthropic retains its own caller (different API format).
-- **Retry with Backoff** — All vendor callers now retry on transient HTTP errors (429, 500, 502, 503) with exponential backoff (3 attempts). Prevents pipeline crashes during brief cloud outages or rate-limit bursts.
-- **Windows Hot-Swap Fix** — `_trigger_reload()` now uses `subprocess.Popen` + `sys.exit()` on Windows instead of `os.execv()`, which could leave the TCP port bound causing EADDRINUSE on restart.
+- **October 2026 model horizon** — Updated model registry and pricing to **Claude Fable 5.1**, **Claude Opus 5.5**, **Claude Sonnet 5.5**, **Claude Haiku 5.5**, **GPT-6 Astra**, **GPT-6.1 Sol**, **GPT-5**, **o3 / o3-mini**, **Gemini 4 Argon**, **Gemini 3.8 Pro/Flash**, **Grok 4.7** (with direct `XAI_API_KEY` vendor routing), and **DeepSeek R1**.
+- **Smart routing & reasoning models** — `openrouter_provider()`, `factory.build()`, and `_api_orchestrate()` now route through `call_model()` so direct vendor keys and local Ollama models work everywhere. OpenAI reasoning models (`o1`/`o3`/`o4`) automatically use `max_completion_tokens` without `temperature`.
+- **Security & path jailing** — Confined `/api/analyze-file` and `/api/native` to the project root, gated `/api/native` terminal execution behind `FORGE_ALLOW_SHELL_EXEC`, tightened localhost CORS origin matching, and removed unused `bs4` import in URL context injection.
+- **Engine & FFI fixes** — Fixed `DimensionScore` subtraction in the self-improvement regression gate, fixed single-loop false positives in `fitness_engine.py`, wired `hotpath_weighted_score` in `factory.py`, and made all workspace paths dynamic relative to the repository root.
 
 ---
 

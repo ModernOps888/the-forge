@@ -5,6 +5,8 @@ __pycache__/
 .env.*
 !.env.example
 .forge_key
+.forge_provenance.json
+.forge_provenance.tmp
 tools/*.sl
 tools/*.json
 *.egg-info/

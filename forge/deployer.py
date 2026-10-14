@@ -79,7 +79,7 @@ def deploy(result: FactoryResult, target_dir: Optional[Path] = None) -> Deployme
         raise ValueError("No winner artifact to deploy")
 
     art = result.winner
-    base = result.output_path or Path(f"C:/TheForge/output/{result.run_id}")
+    base = result.output_path or (Path(__file__).resolve().parent.parent / "output" / result.run_id)
     deploy_dir = target_dir or base
 
     deployers = {

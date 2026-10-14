@@ -41,6 +41,9 @@ class ProvenanceEntry:
             self.entry_hash = hashlib.sha256(payload.encode()).hexdigest()
 
 
+_DEFAULT_PROVENANCE_PATH = Path(__file__).resolve().parent.parent / ".forge_provenance.json"
+
+
 class ProvenanceChain:
     """
     Append-only, hash-chained provenance ledger.
@@ -48,65 +51,79 @@ class ProvenanceChain:
     The chain is tamper-evident: modifying any entry invalidates all subsequent hashes.
     """
 
-    def __init__(self):
+    def __init__(self, persist_path: Optional[str | Path] = None):
+        self._lock = threading.RLock()
         self._entries: list[ProvenanceEntry] = []
         self._head_hash: str = "0" * 64  # genesis
+        self._persist_path: Optional[Path] = Path(persist_path) if persist_path else None
 
     def record(self, event_type: str, entity_id: str, actor: str, data: dict | None = None) -> ProvenanceEntry:
-        entry = ProvenanceEntry(
-            timestamp=time.time(),
-            event_type=event_type,
-            entity_id=entity_id,
-            actor=actor,
-            data=data or {},
-            parent_hash=self._head_hash,
-        )
-        self._entries.append(entry)
-        self._head_hash = entry.entry_hash
-        return entry
+        with self._lock:
+            entry = ProvenanceEntry(
+                timestamp=time.time(),
+                event_type=event_type,
+                entity_id=entity_id,
+                actor=actor,
+                data=data or {},
+                parent_hash=self._head_hash,
+            )
+            self._entries.append(entry)
+            self._head_hash = entry.entry_hash
+            if self._persist_path is not None:
+                try:
+                    self.save_to_disk(self._persist_path)
+                except Exception:
+                    pass
+            return entry
 
     def verify_integrity(self) -> tuple[bool, int]:
         """Verify the entire chain. Returns (valid, entry_count)."""
-        prev_hash = "0" * 64
-        for i, entry in enumerate(self._entries):
-            expected = ProvenanceEntry(
-                timestamp=entry.timestamp,
-                event_type=entry.event_type,
-                entity_id=entry.entity_id,
-                actor=entry.actor,
-                data=entry.data,
-                parent_hash=prev_hash,
-            )
-            if expected.entry_hash != entry.entry_hash:
-                return False, i
-            prev_hash = entry.entry_hash
-        return True, len(self._entries)
+        with self._lock:
+            prev_hash = "0" * 64
+            for i, entry in enumerate(self._entries):
+                expected = ProvenanceEntry(
+                    timestamp=entry.timestamp,
+                    event_type=entry.event_type,
+                    entity_id=entry.entity_id,
+                    actor=entry.actor,
+                    data=entry.data,
+                    parent_hash=prev_hash,
+                )
+                if expected.entry_hash != entry.entry_hash:
+                    return False, i
+                prev_hash = entry.entry_hash
+            return True, len(self._entries)
 
     def get_ancestry(self, entity_id: str) -> list[ProvenanceEntry]:
         """Get all provenance entries for a given entity (submission, tournament)."""
-        return [e for e in self._entries if e.entity_id == entity_id]
+        with self._lock:
+            return [e for e in self._entries if e.entity_id == entity_id]
 
     def get_by_type(self, event_type: str) -> list[ProvenanceEntry]:
-        return [e for e in self._entries if e.event_type == event_type]
+        with self._lock:
+            return [e for e in self._entries if e.event_type == event_type]
 
     @property
     def head(self) -> str:
-        return self._head_hash
+        with self._lock:
+            return self._head_hash
 
     @property
     def length(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     def export_json(self) -> str:
-        return json.dumps([{
-            "timestamp": e.timestamp,
-            "event_type": e.event_type,
-            "entity_id": e.entity_id,
-            "actor": e.actor,
-            "data": e.data,
-            "parent_hash": e.parent_hash,
-            "entry_hash": e.entry_hash,
-        } for e in self._entries], indent=2)
+        with self._lock:
+            return json.dumps([{
+                "timestamp": e.timestamp,
+                "event_type": e.event_type,
+                "entity_id": e.entity_id,
+                "actor": e.actor,
+                "data": e.data,
+                "parent_hash": e.parent_hash,
+                "entry_hash": e.entry_hash,
+            } for e in self._entries], indent=2)
 
     # ── Disk Persistence ──────────────────────────────────────────────────
     # Without persistence the entire "tamper-evident" ledger was lost on
@@ -118,11 +135,12 @@ class ProvenanceChain:
         Uses a write-to-temp-then-rename strategy so a crash mid-write
         never corrupts the on-disk copy.
         """
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(self.export_json(), encoding="utf-8")
-        tmp.replace(target)  # atomic on POSIX; near-atomic on NTFS
+        with self._lock:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(self.export_json(), encoding="utf-8")
+            tmp.replace(target)  # atomic on POSIX; near-atomic on NTFS
 
     @classmethod
     def load_from_disk(cls, path: str | Path) -> "ProvenanceChain":
@@ -131,8 +149,8 @@ class ProvenanceChain:
         Validates hash-chain integrity on load — if the file has been
         tampered with, verification will detect it immediately.
         """
-        chain = cls()
         target = Path(path)
+        chain = cls(persist_path=target)
         if not target.exists():
             return chain
         try:
@@ -151,7 +169,7 @@ class ProvenanceChain:
                 chain._head_hash = entry.entry_hash
         except (json.JSONDecodeError, KeyError, TypeError):
             # Corrupted file — start fresh rather than crash
-            return cls()
+            return cls(persist_path=target)
         return chain
 
 
@@ -418,7 +436,7 @@ _policy: Optional[PolicyEngine] = None
 def get_provenance() -> ProvenanceChain:
     global _chain
     if _chain is None:
-        _chain = ProvenanceChain()
+        _chain = ProvenanceChain.load_from_disk(_DEFAULT_PROVENANCE_PATH)
     return _chain
 
 def get_policy_engine() -> PolicyEngine:

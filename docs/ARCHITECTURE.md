@@ -29,8 +29,8 @@ The Forge is a **compiler-powered agentic evolution platform** that orchestrates
 graph TB
     subgraph External["External Systems"]
         Claude["Claude API"]
-        GPT["GPT-4 API"]
-        Gemini["Gemini API"]
+        GPT["GPT-6 Astra API"]
+        Gemini["Gemini 4 Argon API"]
         MCPlex["MCPlex Gateway"]
         AgentLens["AgentLens Observability"]
     end
@@ -78,7 +78,7 @@ graph TB
 │                   ARENA ORCHESTRATOR                    │
 │                                                         │
 │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌──────────┐  │
-│  │ Claude   │  │  GPT-4  │  │ Gemini  │  │ Local/   │  │
+│  │ Claude   │  │  GPT-6  │  │ Gemini  │  │ Local/   │  │
 │  │ Adapter  │  │ Adapter │  │ Adapter │  │ Custom   │  │
 │  └────┬────┘  └────┬────┘  └────┬────┘  └────┬─────┘  │
 │       │             │            │             │        │

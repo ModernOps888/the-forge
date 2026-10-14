@@ -533,7 +533,7 @@ header{position:relative;z-index:10;display:flex;align-items:center;justify-cont
         <div class="empty-state">
           <div class="empty-icon">🧠</div>
           <div class="empty-title">Ready to Orchestrate</div>
-          <div class="empty-sub">Describe any real-world coding task. Claude will architect the solution, then your chosen LLMs will compete to generate production-quality code — Python, TypeScript, Rust, Go, whatever fits best. The winning code is saved to <code style="color:var(--or);font-size:11px">C:\TheForge\output\orchestrate\</code></div>
+          <div class="empty-sub">Describe any real-world coding task. Claude will architect the solution, then your chosen LLMs will compete to generate production-quality code — Python, TypeScript, Rust, Go, whatever fits best. The winning code is saved to <code style="color:var(--or);font-size:11px">output/orchestrate/</code></div>
         </div>
       </div>
     </div>
@@ -719,11 +719,15 @@ fn main() -> i64 {
           <textarea id="evolveInstruction" placeholder="Describe the improvement... e.g. 'Add a /api/ping endpoint that returns {ping: pong}'" style="width:100%;min-height:80px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 18px;color:var(--tx);font-family:'Inter',sans-serif;font-size:13px;resize:vertical;outline:none;transition:border-color 0.3s;" onfocus="this.style.borderColor='var(--or)'" onblur="this.style.borderColor='var(--border)'"></textarea>
           <div style="display:flex;gap:10px;align-items:center;">
             <select id="evolveModel" style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--tx);font-size:11px;outline:none;cursor:pointer;">
-              <option value="claude-fable">Claude Fable 5 ⭐ Elite</option>
+              <option value="claude-fable">Claude Fable 5.1 ⭐ Elite</option>
               <option value="claude-mythos">Claude Mythos 5 (Elite)</option>
-              <option value="claude-opus">Claude Opus 4.8 (Elite)</option>
-              <option value="claude">Claude Sonnet 5 (Premium)</option>
-              <option value="gemini">Gemini 3.1 Pro (Premium)</option>
+              <option value="claude-opus">Claude Opus 5.5 (Elite)</option>
+              <option value="claude">Claude Sonnet 5.5 (Premium)</option>
+              <option value="gpt">GPT-6 Astra (Elite)</option>
+              <option value="gpt-sol">GPT-6.1 Sol (Premium)</option>
+              <option value="gemini">Gemini 4 Argon (Elite)</option>
+              <option value="gemini-lite">Gemini 3.8 Flash (Economy)</option>
+              <option value="grok">Grok 4.7 (Premium)</option>
               <option value="deepseek-r1">DeepSeek R1 (Reasoning)</option>
               <option value="deepseek">DeepSeek (Economy)</option>
               <option value="o3-mini">o3-mini (Reasoning)</option>
@@ -731,10 +735,10 @@ fn main() -> i64 {
             </select>
             <select id="evolveTarget" style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--tx);font-size:11px;outline:none;cursor:pointer;flex:1;">
               <option value="">forge_server.py (self)</option>
-              <option value="c:\\TheForge\\dashboard\\index.html">dashboard/index.html</option>
-              <option value="c:\\TheForge\\forge\\providers.py">forge/providers.py</option>
-              <option value="c:\\TheForge\\forge\\budget.py">forge/budget.py</option>
-              <option value="c:\\TheForge\\forge\\governance.py">forge/governance.py</option>
+              <option value="dashboard/index.html">dashboard/index.html</option>
+              <option value="forge/providers.py">forge/providers.py</option>
+              <option value="forge/budget.py">forge/budget.py</option>
+              <option value="forge/governance.py">forge/governance.py</option>
             </select>
             <button id="evolveBtn" onclick="doSelfImprove()" style="padding:12px 28px;border-radius:12px;background:linear-gradient(135deg,var(--or),#f59e0b,var(--pk));border:none;color:#fff;font-size:14px;font-weight:800;cursor:pointer;white-space:nowrap;transition:all 0.2s;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 30px rgba(249,115,22,0.4)'" onmouseout="this.style.transform='';this.style.boxShadow=''">🧬 Evolve</button>
           </div>
@@ -835,7 +839,7 @@ const API = '';
 let selectedModel = 'gemini';
 let models = [];
 let sessionId = 'sess_' + Date.now();
-const COLORS = {'claude-fable':'#fbbf24','claude-mythos':'#ec4899','claude-opus':'#f59e0b',claude:'#f97316','claude-3-7-sonnet':'#ea580c',gpt:'#06b6d4','gpt-mini':'#0ea5e9','gpt-nano':'#38bdf8',gemini:'#8b5cf6','gemini-lite':'#a78bfa',grok:'#e11d48',deepseek:'#22c55e','deepseek-r1':'#14b8a6','o3-mini':'#10b981','llama-3.3':'#6366f1','qwen-local':'#fb923c'};
+const COLORS = {'claude-fable':'#fbbf24','claude-mythos':'#ec4899','claude-opus':'#f59e0b',claude:'#f97316','claude-haiku':'#fb923c',gpt:'#06b6d4','gpt-sol':'#0284c7','gpt-mini':'#0ea5e9',gemini:'#8b5cf6','gemini-pro':'#7c3aed','gemini-lite':'#a78bfa',grok:'#e11d48',deepseek:'#22c55e','deepseek-r1':'#14b8a6',o3:'#059669','o3-mini':'#10b981','llama-3.3':'#6366f1','qwen-local':'#fb923c','llama-local':'#fb923c',codellama:'#fb923c','mistral-local':'#fb923c','phi-local':'#fb923c'};
 
 // ══════════════════════════════════════════════════════════════
 // AUTH — every /api/* route (besides /api/auth-bootstrap itself)
@@ -969,7 +973,7 @@ function renderModelPicker() {
   el.innerHTML = models.map(m => {
     const c = COLORS[m.name] || '#94a3b8';
     const sel = m.name === selectedModel ? 'selected' : '';
-    const isLocal = m.name.endsWith('-local');
+    const isLocal = m.name.endsWith('-local') || m.name === 'codellama' || (m.model_id && m.model_id.includes(':') && !m.model_id.includes('/'));
     const vendor = m.vendor || 'openrouter';
     let vendorBadge = '';
     if (isLocal) {
@@ -999,8 +1003,8 @@ function selectModel(name) {
 // CHAT
 // ══════════════════════════════════════════════════════════════
 function sanitizeInput(str) {
-  // Security Enhancement (Qwen-Local Recommendation): prevent XSS
-  return str.replace(/<|>/g, "");
+  // Preserve code/math characters (< and >); HTML escaping is enforced on render in addMessage/formatResponse
+  return str;
 }
 
 async function sendChat() {
@@ -1591,9 +1595,19 @@ async function refreshDashboard() {
     if (Object.keys(budget.providers).length) {
       pd.innerHTML = Object.entries(budget.providers).map(([name,d]) => {
         const c = COLORS[name]||'#94a3b8';
-        // Check if vendor has direct key
-        const vendorInfo = vendors[name];
-        const routeBadge = vendorInfo && vendorInfo.active
+        // Map model alias to vendor key (anthropic, openai, google, deepseek, xai, ollama)
+        const n = name.toLowerCase();
+        const vendorKey = (n.endsWith('-local') || n === 'codellama') ? 'ollama'
+          : n.startsWith('claude') ? 'anthropic'
+          : (n.startsWith('gpt') || n.startsWith('o1') || n.startsWith('o3') || n.startsWith('o4')) ? 'openai'
+          : n.startsWith('gemini') ? 'google'
+          : n.startsWith('deepseek') ? 'deepseek'
+          : n.startsWith('grok') ? 'xai'
+          : n;
+        const vendorInfo = vendors[vendorKey];
+        const routeBadge = vendorKey === 'ollama'
+          ? '<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(251,146,60,0.1);color:#fdba74;border:1px solid rgba(251,146,60,0.15);margin-left:4px">LOCAL</span>'
+          : (vendorInfo && vendorInfo.active)
           ? '<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(34,197,94,0.1);color:#86efac;border:1px solid rgba(34,197,94,0.12);margin-left:4px">DIRECT</span>'
           : '<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(139,92,246,0.1);color:#a78bfa;border:1px solid rgba(139,92,246,0.12);margin-left:4px">RELAY</span>';
         return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">

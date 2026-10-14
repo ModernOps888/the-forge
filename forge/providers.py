@@ -6,6 +6,11 @@ Smart routing architecture:
   2. If not, fall back to OpenRouter as a universal relay.
   3. Local models always route to Ollama.
 
+Supported frontier families (October 2026):
+  Claude Sonnet 5.5, Claude Opus 5.5, Claude Fable 5.1, Claude Mythos 5,
+  GPT-6 Astra, GPT-6.1 Sol, o3 / o3-mini, Gemini 4 Argon, Gemini 3.8 Pro/Flash,
+  DeepSeek (V3 / R1), Grok 4.7, Llama 3.3 70B, and local Ollama models.
+
 Every request is traced for cost, token usage, and latency via the BudgetTracker.
 
 Modes:
@@ -33,6 +38,7 @@ ANTHROPIC_URL  = "https://api.anthropic.com/v1/messages"
 OPENAI_URL     = "https://api.openai.com/v1/chat/completions"
 DEEPSEEK_URL   = "https://api.deepseek.com/chat/completions"
 GOOGLE_AI_URL  = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+XAI_URL        = "https://api.x.ai/v1/chat/completions"
 
 def _get_key() -> str:
     return os.environ.get("OPENROUTER_API_KEY", "")
@@ -49,6 +55,7 @@ _VENDOR_MAP = {
     "openai/":    ("OPENAI_API_KEY",    "openai"),
     "google/":    ("GOOGLE_AI_API_KEY",  "google"),
     "deepseek/":  ("DEEPSEEK_API_KEY",   "deepseek"),
+    "x-ai/":      ("XAI_API_KEY",        "xai"),
 }
 
 def _resolve_vendor(model_id: str) -> tuple[str, str]:
@@ -81,6 +88,7 @@ def get_vendor_status() -> dict[str, dict]:
         "openai":      {"key_env": "OPENAI_API_KEY",      "endpoint": OPENAI_URL},
         "google":      {"key_env": "GOOGLE_AI_API_KEY",   "endpoint": GOOGLE_AI_URL},
         "deepseek":    {"key_env": "DEEPSEEK_API_KEY",    "endpoint": DEEPSEEK_URL},
+        "xai":         {"key_env": "XAI_API_KEY",         "endpoint": XAI_URL},
         "ollama":      {"key_env": None,                   "endpoint": f"{_ollama_host()}/api/chat"},
     }
     result = {}
@@ -211,27 +219,30 @@ def detect_compute_hardware() -> dict:
 
 
 
-# ── Model Registry ───────────────────────────────────────────────────────────
+# ── Model Registry (October 2026 Frontier Horizon) ───────────────────────────
 
 MODELS = {
-    # Elite tier
-    "claude-fable":  "anthropic/claude-fable-5",
+    # Ultra / Elite tier
+    "claude-fable":  "anthropic/claude-fable-5-1",
     "claude-mythos": "anthropic/claude-mythos-5",
-    "claude-opus":   "anthropic/claude-opus-4-8",
+    "claude-opus":   "anthropic/claude-opus-5-5",
     # Premium tier
-    "claude":            "anthropic/claude-sonnet-5",
-    "claude-3-7-sonnet": "anthropic/claude-3-7-sonnet",
-    "gpt":               "openai/gpt-5.6-sol",
-    "gemini":            "google/gemini-3.1-pro",
-    "grok":              "x-ai/grok-4.5",          # no direct key path — routes via OpenRouter
-    "deepseek":          "deepseek/deepseek-chat",  # evergreen alias; also valid on the direct DeepSeek API
-    "deepseek-r1":       "deepseek/deepseek-reasoner",
-    "o3-mini":           "openai/o3-mini",
-    # Economy / Mid aliases
-    "gpt-mini":    "openai/gpt-5.6-terra",
-    "gpt-nano":    "openai/gpt-5.6-luna",
-    "gemini-lite": "google/gemini-3.5-flash",
-    "llama-3.3":   "meta-llama/llama-3.3-70b-instruct",
+    "claude":        "anthropic/claude-sonnet-5-5",
+    "gpt":           "openai/gpt-6-astra",
+    "gpt-sol":       "openai/gpt-6.1-sol",
+    "gemini":        "google/gemini-4-argon",
+    "gemini-pro":    "google/gemini-3.8-pro",
+    "grok":          "x-ai/grok-4.7",
+    "deepseek":      "deepseek/deepseek-chat",
+    "deepseek-r1":   "deepseek/deepseek-r1",
+    "o3":            "openai/o3",
+    "o3-mini":       "openai/o3-mini",
+    # Fast / Economy tier
+    "claude-haiku":  "anthropic/claude-haiku-5-5",
+    "gpt-mini":      "openai/gpt-5",
+    "gpt-nano":      "openai/o3-mini",
+    "gemini-lite":   "google/gemini-3.8-flash",
+    "llama-3.3":     "meta-llama/llama-3.3-70b-instruct",
     # Local models (run via Ollama — GPU, CPU, or Apple Silicon)
     "qwen-local":    "qwen2.5-coder:7b",
     "llama-local":   "llama3.2:latest",
@@ -241,11 +252,14 @@ MODELS = {
 }
 
 MODEL_TIERS = {
+    "ultra":   ["claude-fable", "claude-mythos", "claude-opus"],
+    "elite":   ["claude-fable", "claude-mythos", "claude-opus"],
+    "premium": ["claude", "gpt", "gpt-sol", "gemini", "gemini-pro", "grok", "deepseek-r1", "o3", "o3-mini"],
+    "mid":     ["gpt-mini", "llama-3.3", "claude-haiku"],
+    "fast":    ["claude-haiku", "gemini-lite", "deepseek", "gpt-mini", "gpt-nano", "llama-3.3"],
     "cheap":   ["gemini-lite", "deepseek", "gpt-nano",
                 "qwen-local", "llama-local", "codellama", "mistral-local", "phi-local"],
-    "mid":     ["gpt-mini", "llama-3.3"],
-    "premium": ["claude", "claude-3-7-sonnet", "gpt", "gemini", "grok", "deepseek-r1", "o3-mini"],
-    "elite":   ["claude-fable", "claude-mythos", "claude-opus"],
+    "local":   ["qwen-local", "llama-local", "codellama", "mistral-local", "phi-local"],
 }
 
 
@@ -314,10 +328,14 @@ def _is_local_model(provider_name: str) -> bool:
     """Check if a model name refers to a local Ollama model.
     
     Detection rules:
-      1. Name ends with '-local' (convention)
-      2. Model ID contains ':' but no '/' (Ollama tag format like 'codellama:7b')
+      1. Name ends with '-local' or is 'codellama'
+      2. Name or resolved Model ID contains ':' but no '/' (Ollama tag format like 'codellama:7b')
     """
-    if provider_name.endswith("-local"):
+    if not provider_name:
+        return False
+    if provider_name.endswith("-local") or provider_name == "codellama":
+        return True
+    if ":" in provider_name and "/" not in provider_name:
         return True
     model_id = MODELS.get(provider_name, "")
     return ":" in model_id and "/" not in model_id
@@ -469,10 +487,13 @@ def call_anthropic(
     )
 
     t0 = time.time()
-    try:
+    def _do_request():
         with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = (time.time() - t0) * 1000
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = _retry_with_backoff(_do_request)
+        latency_ms = (time.time() - t0) * 1000
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Anthropic {e.code}: {body_text[:300]}")
@@ -560,11 +581,11 @@ def _call_openai_compatible(
     submission_id: str = "",
     timeout: int = 90,
 ) -> tuple[str, dict]:
-    """Shared caller for OpenAI-compatible APIs (OpenAI, Google, DeepSeek).
+    """Shared caller for OpenAI-compatible APIs (OpenAI, Google, DeepSeek, xAI).
 
-    Eliminates ~180 lines of copy-paste between the three vendor callers
-    that previously existed as separate functions with 95% identical code.
-    Includes retry-with-backoff for transient errors.
+    Eliminates ~180 lines of copy-paste between vendor callers.
+    Includes retry-with-backoff for transient errors and reasoning-model
+    parameter handling (`max_completion_tokens` for o1/o3/o4).
     """
     tracker = get_tracker()
     if tracker.is_exhausted:
@@ -572,20 +593,34 @@ def _call_openai_compatible(
 
     bare_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
 
-    payload = json.dumps({
-        "model": bare_model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }).encode("utf-8")
+    # Reasoning models (o1, o3, o4 families) require max_completion_tokens and reject temperature
+    if bare_model.startswith(("o1", "o3", "o4")):
+        body = {
+            "model": bare_model,
+            "messages": messages,
+            "max_completion_tokens": max_tokens,
+        }
+    else:
+        body = {
+            "model": bare_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+    payload = json.dumps(body).encode("utf-8")
 
-    # Build default headers (caller can override for Google key-in-URL style)
+    # Build default headers (avoid sending Authorization header when key is in query string)
     req_headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    if "key=" not in endpoint and api_key:
+        req_headers["Authorization"] = f"Bearer {api_key}"
     if headers:
-        req_headers.update(headers)
+        for k, v in headers.items():
+            if v is None:
+                req_headers.pop(k, None)
+            else:
+                req_headers[k] = v
 
     req = urllib.request.Request(
         endpoint,
@@ -677,7 +712,7 @@ def call_google_direct(
     # Google uses key-in-URL instead of Authorization header
     return _call_openai_compatible(
         f"{GOOGLE_AI_URL}?key={api_key}", model_id, messages, api_key, "google",
-        headers={"Content-Type": "application/json"},  # no Bearer token
+        headers={"Content-Type": "application/json", "Authorization": None},  # no Bearer token
         max_tokens=max_tokens, temperature=temperature,
         provider_name=provider_name or "gemini", purpose=purpose,
         generation=generation, submission_id=submission_id,
@@ -704,6 +739,26 @@ def call_deepseek_direct(
     )
 
 
+def call_xai_direct(
+    model_id: str,
+    messages: list[dict],
+    api_key: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    provider_name: str = "",
+    purpose: str = "code_gen",
+    generation: int = -1,
+    submission_id: str = "",
+) -> tuple[str, dict]:
+    """Call xAI Grok Chat API directly."""
+    return _call_openai_compatible(
+        XAI_URL, model_id, messages, api_key, "xai",
+        max_tokens=max_tokens, temperature=temperature,
+        provider_name=provider_name or "grok", purpose=purpose,
+        generation=generation, submission_id=submission_id,
+    )
+
+
 # ── Smart Router Dispatch ────────────────────────────────────────────────────
 
 _VENDOR_CALLERS = {
@@ -711,6 +766,7 @@ _VENDOR_CALLERS = {
     "openai":    call_openai_direct,
     "google":    call_google_direct,
     "deepseek":  call_deepseek_direct,
+    "xai":       call_xai_direct,
 }
 
 
@@ -730,13 +786,15 @@ def call_model(
       2. Direct vendor key available → call vendor API directly
       3. Otherwise → OpenRouter fallback
     """
-    if _is_local_model(provider_name):
+    if _is_local_model(provider_name) or _is_local_model(model_id):
+        resolved_local = MODELS.get(model_id, model_id)
         return call_ollama_chat(
-            model_id, messages,
+            resolved_local, messages,
             max_tokens=max_tokens, temperature=temperature,
-            provider_name=provider_name, purpose=purpose,
+            provider_name=provider_name or model_id, purpose=purpose,
         )
 
+    model_id = MODELS.get(model_id, model_id)
     vendor, api_key = _resolve_vendor(model_id)
     caller = _VENDOR_CALLERS.get(vendor)
 
@@ -803,10 +861,13 @@ def call_openrouter(
     )
 
     t0 = time.time()
+    def _do_request():
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latency_ms = (time.time() - t0) * 1000
+        data = _retry_with_backoff(_do_request)
+        latency_ms = (time.time() - t0) * 1000
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenRouter {e.code}: {body[:300]}")
@@ -851,7 +912,7 @@ def call_openrouter(
 # ── Code Provider Factory ────────────────────────────────────────────────────
 
 def openrouter_provider(model_name: str):
-    """Create a Forge-compatible provider for the evolution arena."""
+    """Create a Forge-compatible provider for the evolution arena (uses smart routing)."""
     model_id = MODELS.get(model_name, model_name)
 
     def generate(description: str, function_signature: str) -> str:
@@ -867,7 +928,7 @@ def openrouter_provider(model_name: str):
             {"role": "system", "content": CODE_SYSTEM},
             {"role": "user", "content": prompt},
         ]
-        content, usage = call_openrouter(
+        content, usage = call_model(
             model_id, messages,
             max_tokens=1024, temperature=0.7,
             provider_name=model_name, purpose="code_gen",
@@ -878,7 +939,7 @@ def openrouter_provider(model_name: str):
 
 
 def ollama_provider(model_name: str):
-    """Create a Forge-compatible local provider hitting Ollama API."""
+    """Create a Forge-compatible local provider hitting Ollama API with telemetry & OLLAMA_HOST."""
     model_id = MODELS.get(model_name, model_name)
 
     def generate(description: str, function_signature: str) -> str:
@@ -890,30 +951,15 @@ def ollama_provider(model_name: str):
             f"Then add a main() function that tests it and returns an i64 result.\n"
             f"Return ONLY the code, no explanation."
         )
-        payload = json.dumps({
-            "model": model_id,
-            "messages": [
-                {"role": "system", "content": CODE_SYSTEM},
-                {"role": "user", "content": prompt}
-            ],
-            "stream": False,
-            "options": {"temperature": 0.7, "num_ctx": 8192}
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            "http://localhost:11434/api/chat",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        messages = [
+            {"role": "system", "content": CODE_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        content, _ = call_ollama_chat(
+            model_id, messages,
+            max_tokens=2048, temperature=0.7,
+            provider_name=model_name, purpose="arena_generation",
         )
-
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            content = data["message"]["content"]
-        except Exception as e:
-            raise RuntimeError(f"Ollama local error ({model_id}): {e}")
-
         return _clean_code(content)
 
     return generate
@@ -922,7 +968,7 @@ def ollama_provider(model_name: str):
 def make_all_providers() -> dict[str, object]:
     providers = {}
     for name in MODELS:
-        if name.endswith("-local"):
+        if _is_local_model(name):
             providers[name] = ollama_provider(name)
         else:
             providers[name] = openrouter_provider(name)
@@ -997,7 +1043,7 @@ def consensus(query: str, models: list[str] | None = None) -> dict:
         "Note where models agree and where they diverge. Be precise."
     )
 
-    synth_model = MODELS.get("gemini", "google/gemini-3.1-pro")  # used for synthesis
+    synth_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")  # used for synthesis
     messages = [
         {"role": "system", "content": "You are a synthesis agent. Merge multiple AI responses into one authoritative answer."},
         {"role": "user", "content": synthesis_prompt},
@@ -1005,7 +1051,7 @@ def consensus(query: str, models: list[str] | None = None) -> dict:
     merged, _ = call_model(
         synth_model, messages,
         max_tokens=2048, temperature=0.3,
-        provider_name="gemini", purpose="synthesis",
+        provider_name="gemini-lite", purpose="synthesis",
     )
 
     return {

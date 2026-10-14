@@ -67,18 +67,52 @@ def notify(title: str, message: str, timeout: int = 8):
 
 # ── Forge API Client ──────────────────────────────────────────────────────────
 
+_CACHED_API_KEY: str = ""
+
+def _get_forge_api_key() -> str:
+    """Resolve the Forge API key from env, .forge_key file, or /api/auth-bootstrap."""
+    global _CACHED_API_KEY
+    if _CACHED_API_KEY:
+        return _CACHED_API_KEY
+    env_key = os.environ.get("FORGE_API_KEY", "").strip()
+    if env_key:
+        _CACHED_API_KEY = env_key
+        return _CACHED_API_KEY
+    key_file = Path(__file__).resolve().parent / ".forge_key"
+    if key_file.exists():
+        try:
+            k = key_file.read_text(encoding="utf-8").strip()
+            if k:
+                _CACHED_API_KEY = k
+                return _CACHED_API_KEY
+        except Exception:
+            pass
+    try:
+        with urllib.request.urlopen(f"{FORGE_API}/api/auth-bootstrap", timeout=5) as resp:
+            boot = json.loads(resp.read().decode("utf-8"))
+            _CACHED_API_KEY = boot.get("key", "")
+    except Exception:
+        pass
+    return _CACHED_API_KEY
+
+
 def forge_request(endpoint: str, data: dict | None = None, method: str = "GET") -> dict:
-    """Make a request to the Forge API."""
+    """Make an authenticated request to the Forge API."""
     url = f"{FORGE_API}{endpoint}"
+    headers = {}
+    api_key = _get_forge_api_key()
+    if api_key:
+        headers["X-Forge-Key"] = api_key
     if data:
         payload = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             url, data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
     else:
-        req = urllib.request.Request(url, method=method)
+        req = urllib.request.Request(url, headers=headers, method=method)
 
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:

@@ -24,7 +24,7 @@ Usage (add to Cursor / VS Code MCP config):
     "mcpServers": {
       "the-forge": {
         "command": "python",
-        "args": ["C:/TheForge/forge_mcp.py"],
+        "args": ["forge_mcp.py"],
         "env": {
           "OPENROUTER_API_KEY": "sk-or-v1-...",
           "VITALIS_ROOT": "C:/Vitalis-V60"
@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from forge.compiler import compile_and_run, vitalis_version
-from forge.providers import call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM, get_vendor_status
+from forge.providers import call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM, get_vendor_status, _is_local_model
 from forge.budget import get_tracker, BudgetConfig
 from forge.governance import get_provenance, get_policy_engine
 from forge.factory import build as factory_build, ARTIFACT_TYPES
@@ -217,7 +217,7 @@ TOOLS = [
     },
     {
         "name": "forge_provider_status",
-        "description": "Get status of all configured LLM vendors (Anthropic, OpenAI, Google, DeepSeek, OpenRouter, Ollama). Shows which have active API keys and their endpoints.",
+        "description": "Get status of all configured LLM vendors (Anthropic, OpenAI, Google, DeepSeek, xAI, OpenRouter, Ollama). Shows which have active API keys and their endpoints.",
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
@@ -346,13 +346,13 @@ def handle_forge_consensus(params: dict) -> dict:
         synth_prompt += f"=== {name.upper()} ===\n{ans[:1500]}\n\n"
     synth_prompt += "Synthesize into one authoritative answer. Note agreements/divergences."
 
-    synth_model = MODELS.get("gemini-lite", "google/gemini-3.5-flash")
+    synth_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")
     synth_msgs = [
         {"role": "system", "content": "You are a synthesis agent."},
         {"role": "user", "content": synth_prompt},
     ]
     merged, _ = call_model(synth_model, synth_msgs, max_tokens=2048, temperature=0.3,
-                                 provider_name="gemini", purpose="mcp_synthesis")
+                                 provider_name="gemini-lite", purpose="mcp_synthesis")
 
     return {
         "individual": individual,
@@ -466,6 +466,7 @@ def handle_forge_orchestrate(params: dict) -> dict:
             MODELS["claude"],
             [{"role": "user", "content": prompt}],
             max_tokens=1500,
+            provider_name="claude",
             purpose="orchestrate"
         )
         content = content.replace("```json", "").replace("```", "").strip()
@@ -481,7 +482,7 @@ def handle_forge_orchestrate(params: dict) -> dict:
         # Run arena
         arena = Arena(config=ArenaConfig(max_generations=5, population_size=8, verbose=False))
         for m in models:
-            provider_fn = ollama_provider(m) if m.endswith("-local") else openrouter_provider(m)
+            provider_fn = ollama_provider(m) if _is_local_model(m) else openrouter_provider(m)
             arena.register_provider(m, provider_fn)
             
         tournament = arena.run(challenge)
@@ -541,7 +542,7 @@ def handle_request(req: dict) -> dict | None:
         return {
             "jsonrpc": "2.0", "id": req_id,
             "result": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-11-25",
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "the-forge", "version": "1.0.0"},
             },

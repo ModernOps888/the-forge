@@ -207,8 +207,12 @@ def _py_performance(code: str) -> DimensionScore:
 
     # Nested loops (O(n²) risk)
     for node in ast.walk(tree):
-        if isinstance(node, ast.For):
-            inner = any(isinstance(n, ast.For) for n in ast.walk(node))
+        if isinstance(node, (ast.For, ast.While)):
+            inner = any(
+                isinstance(n, (ast.For, ast.While))
+                for child in ast.iter_child_nodes(node)
+                for n in ast.walk(child)
+            )
             if inner:
                 flags.append("NESTED_LOOPS (O(n²) risk)")
                 score -= 0.2

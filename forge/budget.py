@@ -15,6 +15,7 @@ Tracks:
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -26,26 +27,42 @@ from . import compiler as _c     # hotpath EMA for trend tracking
 # ── OpenRouter Pricing ($ per 1M tokens) ─────────────────────────────────────
 
 PRICING = {
-    # Elite tier
+    # Ultra / Elite tier (October 2026)
+    "anthropic/claude-fable-5-1":   {"input": 10.00, "output": 50.00},
     "anthropic/claude-fable-5":     {"input": 10.00, "output": 50.00},
     "anthropic/claude-mythos-5":    {"input": 15.00, "output": 75.00},
+    "anthropic/claude-opus-5-5":    {"input": 5.00, "output": 25.00},
     "anthropic/claude-opus-4-8":    {"input": 5.00, "output": 25.00},
     # Premium tier
+    "anthropic/claude-sonnet-5-5":  {"input": 3.00, "output": 15.00},
     "anthropic/claude-sonnet-5":    {"input": 3.00, "output": 15.00},
-    "anthropic/claude-3-7-sonnet":  {"input": 3.00, "output": 15.00},
+    "anthropic/claude-haiku-5-5":   {"input": 0.80, "output": 4.00},
+    "openai/gpt-6-astra":           {"input": 2.50, "output": 10.00},
+    "openai/gpt-6.1-sol":           {"input": 3.00, "output": 24.00},
     "openai/gpt-5.6-sol":           {"input": 3.00, "output": 24.00},
+    "openai/gpt-5":                 {"input": 1.25, "output": 5.00},
+    "openai/o3":                    {"input": 2.00, "output": 8.00},
+    "openai/o3-mini":               {"input": 1.10, "output": 4.40},
+    "google/gemini-4-argon":        {"input": 2.00, "output": 12.00},
+    "google/gemini-3.8-pro":        {"input": 1.25, "output": 10.00},
     "google/gemini-3.1-pro":        {"input": 2.00, "output": 12.00},
+    "google/gemini-3.8-flash":      {"input": 0.15, "output": 0.60},
+    "google/gemini-3.5-flash":      {"input": 0.30, "output": 2.50},
+    "x-ai/grok-4.7":                {"input": 3.00, "output": 15.00},
     "x-ai/grok-4.5":                {"input": 3.00, "output": 15.00},
     "deepseek/deepseek-chat":       {"input": 0.27, "output": 1.10},
+    "deepseek/deepseek-r1":         {"input": 0.55, "output": 2.19},
     "deepseek/deepseek-reasoner":   {"input": 0.55, "output": 2.19},
-    "openai/o3-mini":               {"input": 1.10, "output": 4.40},
     # Economy tier
     "openai/gpt-5.6-terra":         {"input": 0.60, "output": 2.40},
     "openai/gpt-5.6-luna":          {"input": 0.15, "output": 0.60},
-    "google/gemini-3.5-flash":      {"input": 0.30, "output": 2.50},
     "meta-llama/llama-3.3-70b-instruct": {"input": 0.40, "output": 0.40},
-    # Local SLM (free — runs on local GPU via Ollama)
+    # Local SLM (free — runs on local GPU/CPU via Ollama)
     "qwen2.5-coder:7b":             {"input": 0.00, "output": 0.00},
+    "llama3.2:latest":              {"input": 0.00, "output": 0.00},
+    "codellama:7b":                 {"input": 0.00, "output": 0.00},
+    "mistral:latest":               {"input": 0.00, "output": 0.00},
+    "phi3:mini":                    {"input": 0.00, "output": 0.00},
 }
 
 
@@ -55,7 +72,7 @@ class RequestTrace:
     timestamp: float = 0.0
     model_id: str = ""
     provider_name: str = ""
-    vendor: str = ""            # "anthropic", "openai", "google", "deepseek", "openrouter", "ollama"
+    vendor: str = ""            # "anthropic", "openai", "google", "deepseek", "xai", "openrouter", "ollama"
     purpose: str = ""           # "code_gen", "chat", "research"
     
     # Token metrics
@@ -100,6 +117,7 @@ class CostTracker:
     def __init__(self, budget: Optional[BudgetConfig] = None):
         self.budget = budget or BudgetConfig()
         self.traces: list[RequestTrace] = []
+        self._lock = threading.Lock()
         self._total_cost: float = 0.0
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
@@ -113,8 +131,11 @@ class CostTracker:
 
     def record(self, trace: RequestTrace) -> None:
         """Record a request trace and update running metrics."""
-        # Calculate cost
-        pricing = PRICING.get(trace.model_id, {"input": 1.0, "output": 3.0})
+        # Calculate cost (local Ollama models are always free)
+        if trace.vendor == "ollama" or (":" in trace.model_id and "/" not in trace.model_id):
+            pricing = {"input": 0.0, "output": 0.0}
+        else:
+            pricing = PRICING.get(trace.model_id, {"input": 1.0, "output": 3.0})
         trace.cost_usd = (
             (trace.input_tokens / 1_000_000) * pricing["input"]
             + (trace.output_tokens / 1_000_000) * pricing["output"]
@@ -124,36 +145,37 @@ class CostTracker:
         if trace.output_tokens > 0:
             trace.compression_ratio = trace.response_chars / trace.output_tokens
 
-        self.traces.append(trace)
-        self._total_cost += trace.cost_usd
-        self._total_input_tokens += trace.input_tokens
-        self._total_output_tokens += trace.output_tokens
-        self._request_count += 1
+        with self._lock:
+            self.traces.append(trace)
+            self._total_cost += trace.cost_usd
+            self._total_input_tokens += trace.input_tokens
+            self._total_output_tokens += trace.output_tokens
+            self._request_count += 1
 
-        # Per-provider tracking
-        p = trace.provider_name
-        self._provider_costs[p] = self._provider_costs.get(p, 0) + trace.cost_usd
-        self._provider_tokens[p] = self._provider_tokens.get(p, 0) + trace.total_tokens
+            # Per-provider tracking
+            p = trace.provider_name
+            self._provider_costs[p] = self._provider_costs.get(p, 0) + trace.cost_usd
+            self._provider_tokens[p] = self._provider_tokens.get(p, 0) + trace.total_tokens
 
-        # EMA cost trend
-        self._cost_ema = _c.hotpath_ema_update(self._cost_ema, trace.cost_usd, 0.3)
+            # EMA cost trend
+            self._cost_ema = _c.hotpath_ema_update(self._cost_ema, trace.cost_usd, 0.3)
 
-        # Cost spike detection
-        if (self.budget.alert_on_cost_spike
-            and self._request_count > 5
-            and trace.cost_usd > self._cost_ema * self.budget.cost_spike_threshold):
-            self._alert(f"⚠️  COST SPIKE: ${trace.cost_usd:.4f} "
-                       f"(EMA: ${self._cost_ema:.4f}) on {trace.model_id}")
+            # Cost spike detection
+            if (self.budget.alert_on_cost_spike
+                and self._request_count > 5
+                and trace.cost_usd > self._cost_ema * self.budget.cost_spike_threshold):
+                self._alert(f"⚠️  COST SPIKE: ${trace.cost_usd:.4f} "
+                           f"(EMA: ${self._cost_ema:.4f}) on {trace.model_id}")
 
-        # Budget check
-        if self._total_cost >= self.budget.max_budget_usd:
-            self._budget_exhausted = True
-            self._alert(f"🛑 BUDGET EXHAUSTED: ${self._total_cost:.4f} "
-                       f">= ${self.budget.max_budget_usd:.2f}")
+            # Budget check
+            if self._total_cost >= self.budget.max_budget_usd:
+                self._budget_exhausted = True
+                self._alert(f"🛑 BUDGET EXHAUSTED: ${self._total_cost:.4f} "
+                           f">= ${self.budget.max_budget_usd:.2f}")
 
-        elif self._total_cost >= self.budget.max_budget_usd * self.budget.warning_threshold_pct:
-            self._alert(f"⚠️  BUDGET WARNING: ${self._total_cost:.4f} "
-                       f"({self.pct_used:.0%} of ${self.budget.max_budget_usd:.2f})")
+            elif self._total_cost >= self.budget.max_budget_usd * self.budget.warning_threshold_pct:
+                self._alert(f"⚠️  BUDGET WARNING: ${self._total_cost:.4f} "
+                           f"({self.pct_used:.0%} of ${self.budget.max_budget_usd:.2f})")
 
     # ── Budget Queries ────────────────────────────────────────────────────
 
@@ -313,7 +335,10 @@ def estimate_cost_preview(text: str, model_id: str, direction: str = "input") ->
     Useful for budget guard checks before expensive operations.
     """
     tokens = estimate_tokens(text)
-    pricing = PRICING.get(model_id, {"input": 1.0, "output": 3.0})
+    if ":" in model_id and "/" not in model_id:
+        pricing = {"input": 0.0, "output": 0.0}
+    else:
+        pricing = PRICING.get(model_id, {"input": 1.0, "output": 3.0})
     rate = pricing.get(direction, pricing.get("input", 1.0))
     return (tokens / 1_000_000) * rate
 

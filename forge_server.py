@@ -26,6 +26,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -77,6 +78,7 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 TRACKER = get_tracker(BudgetConfig(max_budget_usd=float(os.environ.get("FORGE_BUDGET_USD", "50.0"))))
 PROVENANCE = get_provenance()
 BREAKER = CircuitBreaker(failure_threshold=5, cooldown_seconds=30)
+CHAT_LOCK = threading.Lock()
 CHAT_HISTORIES: dict[str, list[dict]] = {}  # session_id -> messages
 CHAT_HISTORY_ORDER: list[str] = []  # session_id insertion order, for LRU eviction
 MAX_CHAT_SESSIONS = 200
@@ -116,14 +118,18 @@ def _is_sensitive_path(p: Path) -> bool:
     return any(pat in s for pat in _SENSITIVE_PATH_PATTERNS)
 
 
-def _touch_chat_session(session: str):
+def _touch_chat_session(session: str) -> list[dict]:
     """Track LRU order for CHAT_HISTORIES and evict oldest sessions past MAX_CHAT_SESSIONS."""
-    if session in CHAT_HISTORY_ORDER:
-        CHAT_HISTORY_ORDER.remove(session)
-    CHAT_HISTORY_ORDER.append(session)
-    while len(CHAT_HISTORY_ORDER) > MAX_CHAT_SESSIONS:
-        oldest = CHAT_HISTORY_ORDER.pop(0)
-        CHAT_HISTORIES.pop(oldest, None)
+    with CHAT_LOCK:
+        if session in CHAT_HISTORY_ORDER:
+            CHAT_HISTORY_ORDER.remove(session)
+        CHAT_HISTORY_ORDER.append(session)
+        while len(CHAT_HISTORY_ORDER) > MAX_CHAT_SESSIONS:
+            oldest = CHAT_HISTORY_ORDER.pop(0)
+            CHAT_HISTORIES.pop(oldest, None)
+        if session not in CHAT_HISTORIES:
+            CHAT_HISTORIES[session] = []
+        return CHAT_HISTORIES[session]
 
 # Record server start
 PROVENANCE.record("system_start", "forge_server", "system", {
@@ -553,7 +559,9 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                             bv = getattr(baseline_report, dim, None)
                             mv = getattr(mutant_report,   dim, None)
                             if bv is not None and mv is not None:
-                                diff = round(mv - bv, 2)
+                                bv_score = bv.score if hasattr(bv, "score") else float(bv)
+                                mv_score = mv.score if hasattr(mv, "score") else float(mv)
+                                diff = round(mv_score - bv_score, 2)
                                 if diff < 0:
                                     dims[dim] = diff
                         print(f"  [Gate] BLOCKED — regression {b_score:.1f} -> {m_score:.1f} ({delta:+.1f})")
@@ -754,7 +762,9 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         if self._budget_gate():
             return
 
-        path = Path(file_path)
+        path = self._resolve_jailed_path(file_path)
+        if path is None:
+            return self._json_response({"error": "Refusing to analyze file outside project root"}, 403)
         if _is_sensitive_path(path):
             return self._json_response({"error": "Refusing to analyze a credential/secret-looking file"}, 403)
         if not path.exists():
@@ -914,7 +924,9 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             return self._json_response({"error": "action and target required"}, 400)
 
         try:
-            target_path = Path(target)
+            target_path = self._resolve_jailed_path(target)
+            if target_path is None:
+                return self._json_response({"error": "Target path must be inside project root"}, 403)
             if not target_path.exists():
                 return self._json_response({"error": f"Path not found: {target}"}, 404)
 
@@ -927,6 +939,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                 subprocess.run(["code", str(target_path)], shell=False)
 
             elif action == "terminal":
+                if not FORGE_ALLOW_SHELL_EXEC:
+                    return self._json_response({"error": "Terminal execution is disabled (set FORGE_ALLOW_SHELL_EXEC=true)"}, 403)
                 # Open an unattached PowerShell window in the target's directory.
                 # No shell=True, no string-built command — args are passed as discrete argv
                 # entries so nothing in `target` can break out into a second command.
@@ -1057,10 +1071,9 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         """Finds URLs in the message, scrapes them, and appends the text as context."""
         import re
         import urllib.request
-        from bs4 import BeautifulSoup
 
-        # Match explicit http(s) URLs and standalone domains (e.g., infinitytechstack.uk)
-        raw_urls = re.findall(r'(?:https?://[^\s<>"]+|(?:\w+\.)+[a-zA-Z]{2,}(?:/[^\s<>"]*)?)', message)
+        # Match explicit http(s) URLs only (avoids false positives on dotted identifiers like math.sin)
+        raw_urls = re.findall(r'https?://[^\s<>"]+', message)
         
         urls = set()
         for u in raw_urls:
@@ -1154,13 +1167,11 @@ class ForgeHandler(SimpleHTTPRequestHandler):
 
         # Get or create session history (LRU-capped so unlimited caller-chosen
         # session_ids can't grow CHAT_HISTORIES without bound)
-        _touch_chat_session(session)
-        if session not in CHAT_HISTORIES:
-            CHAT_HISTORIES[session] = []
-        history = CHAT_HISTORIES[session]
+        history = _touch_chat_session(session)
 
         # Token-aware sliding window: trim history to stay within context budget
-        trimmed_history = self._trim_history_to_budget(history, max_tokens=12000)
+        with CHAT_LOCK:
+            trimmed_history = self._trim_history_to_budget(list(history), max_tokens=12000)
 
         # Build memory context
         memory_ctx = MEMORY.build_context(query=raw_message, session=session, scope="chat")
@@ -1187,9 +1198,11 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             MEMORY.remember("assistant", content, session=session, persist=True)
 
             # Store ONLY the raw message in history (no URL bloat)
-            history.append({"role": "user", "content": raw_message})
-            history.append({"role": "assistant", "content": content})
-            del history[:-MAX_HISTORY_MESSAGES_PER_SESSION]
+            with CHAT_LOCK:
+                history.append({"role": "user", "content": raw_message})
+                history.append({"role": "assistant", "content": content})
+                del history[:-MAX_HISTORY_MESSAGES_PER_SESSION]
+                session_msg_count = len(history)
 
             # Record provenance
             PROVENANCE.record("chat_message", session, f"provider:{model}", {
@@ -1215,7 +1228,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                     "remaining": round(TRACKER.remaining_budget, 4),
                     "pct_used": round(TRACKER.pct_used * 100, 2),
                 },
-                "session_messages": len(history),
+                "session_messages": session_msg_count,
                 "context_window_tokens": self._estimate_message_tokens(messages),
             })
 
@@ -1239,13 +1252,14 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         if self._budget_gate():
             return
 
+        if not BREAKER.can_proceed():
+            return self._json_response({"error": "Circuit breaker open — too many API failures"}, 503)
+
         enriched_message = self._inject_url_context(raw_message)
 
-        _touch_chat_session(session)
-        if session not in CHAT_HISTORIES:
-            CHAT_HISTORIES[session] = []
-        history = CHAT_HISTORIES[session]
-        trimmed_history = self._trim_history_to_budget(history, max_tokens=15000)
+        history = _touch_chat_session(session)
+        with CHAT_LOCK:
+            trimmed_history = self._trim_history_to_budget(list(history), max_tokens=15000)
 
         # Initialize the working session
         messages = [{"role": "system", "content": COWORK_SYSTEM}]
@@ -1405,9 +1419,16 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         if not final_content:
             final_content = content
 
-        history.append({"role": "user", "content": raw_message})
-        history.append({"role": "assistant", "content": final_content})
-        del history[:-MAX_HISTORY_MESSAGES_PER_SESSION]
+        with CHAT_LOCK:
+            history.append({"role": "user", "content": raw_message})
+            history.append({"role": "assistant", "content": final_content})
+            del history[:-MAX_HISTORY_MESSAGES_PER_SESSION]
+
+        BREAKER.record_success()
+        PROVENANCE.record("cowork_session", session, f"provider:{model}", {
+            "tokens": total_input_tokens + total_output_tokens,
+            "cost": round(total_cost, 6),
+        })
 
         stream_chunk({
             "type": "final",
@@ -1415,7 +1436,12 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             "model": model,
             "model_id": model_id,
             "tokens": {"input": total_input_tokens, "output": total_output_tokens},
-            "cost_usd": round(total_cost, 6)
+            "cost_usd": round(total_cost, 6),
+            "budget": {
+                "total_spent": round(TRACKER.total_cost, 6),
+                "remaining": round(TRACKER.remaining_budget, 4),
+                "pct_used": round(TRACKER.pct_used * 100, 2),
+            },
         })
 
     def _api_research(self, body: dict):
@@ -1511,7 +1537,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             "Note agreements and divergences. Be precise."
         )
 
-        synth_model = MODELS.get("gemini", "google/gemini-3.1-pro")
+        synth_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")
         messages = [
             {"role": "system", "content": "You are a synthesis agent. Merge multiple AI responses into one authoritative answer."},
             {"role": "user", "content": synth_prompt},
@@ -1519,7 +1545,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         merged, _ = call_model(
             synth_model, messages,
             max_tokens=2048, temperature=0.3,
-            provider_name="gemini", purpose="synthesis",
+            provider_name="gemini-lite", purpose="synthesis",
         )
 
         PROVENANCE.record("consensus_query", f"consensus_{int(time.time())}", "arena", {
@@ -1690,7 +1716,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         )
 
         try:
-            arch_content, arch_usage = call_openrouter(
+            arch_content, arch_usage = call_model(
                 MODELS["claude"],
                 [{"role": "user", "content": architect_prompt}],
                 max_tokens=1500,
@@ -1794,7 +1820,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         # ── Step 3: Save winner to disk ───────────────────────────────
         output_path = ""
         if winner and winner["code"]:
-            out_dir = Path("C:/TheForge/output/orchestrate")
+            out_dir = PROJECT_ROOT / "output" / "orchestrate"
             out_dir.mkdir(parents=True, exist_ok=True)
             safe_name = spec.get("name", "solution").replace(" ", "_")[:40]
             out_file = out_dir / f"{safe_name}_{int(time.time())}.{_ext_for_lang(lang)}"
@@ -1865,7 +1891,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         if not re.match(r"^[A-Za-z0-9_-]+$", run_id):
             return self._json_response({"error": "run_id may only contain letters, digits, '_' and '-'"}, 400)
 
-        output_base = Path("C:/TheForge/output") / run_id
+        output_base = PROJECT_ROOT / "output" / run_id
         manifest_path = output_base / "manifest.json"
         if not manifest_path.exists():
             return self._json_response({"error": f"Run {run_id} not found at {output_base}"}, 404)
@@ -1967,8 +1993,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
     def _cors(self):
         """CORS headers — locked to localhost; unknown origins get no ACAO (browser blocks read)."""
         origin = self.headers.get("Origin", "")
-        allowed = ("http://localhost", "http://127.0.0.1")
-        if not origin or any(origin.startswith(a) for a in allowed):
+        if not origin or re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin):
             self.send_header("Access-Control-Allow-Origin", origin or "*")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Forge-Key, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

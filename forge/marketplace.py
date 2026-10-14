@@ -19,7 +19,7 @@ from typing import Optional
 
 from .skills import SkillDNA
 
-MARKETPLACE_ROOT = Path("C:/TheForge/marketplace")
+MARKETPLACE_ROOT = Path(__file__).resolve().parent.parent / "marketplace"
 INDEX_FILE = MARKETPLACE_ROOT / "index.json"
 SKILLS_DIR = MARKETPLACE_ROOT / "skills"
 ARTIFACTS_DIR = MARKETPLACE_ROOT / "artifacts"

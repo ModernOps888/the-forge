@@ -31,18 +31,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .providers import call_openrouter, MODELS, CODE_SYSTEM
+from .providers import call_model, call_openrouter, MODELS, CODE_SYSTEM
 from .budget import get_tracker, RequestTrace
 from .governance import get_provenance
 from .skills import SkillDNA, certify_from_compilation
 
 # Try Vitalis hotpaths for heuristic scoring
 try:
-    from .vitalis_ffi import VitalisDLL
-    _vdll = VitalisDLL()
+    from .vitalis_ffi import hotpath_weighted_score
     _HAS_VITALIS = True
 except Exception:
-    _vdll = None
+    hotpath_weighted_score = None
     _HAS_VITALIS = False
 
 
@@ -261,7 +260,7 @@ def build(
         artifact_type: One of ARTIFACT_TYPES keys, or "auto" to detect
         models: List of model names. Defaults to all 4 primary models.
         extra_context: Additional constraints, interfaces, or requirements
-        save_dir: Where to save artifacts (defaults to C:/TheForge/output/)
+        save_dir: Where to save artifacts (defaults to <repo_root>/output/)
         score: Whether to LLM-score each artifact (costs tokens but improves quality)
     
     Returns:
@@ -309,7 +308,7 @@ def build(
                 {"role": "system", "content": FACTORY_SYSTEM},
                 {"role": "user", "content": gen_prompt},
             ]
-            content, usage = call_openrouter(
+            content, usage = call_model(
                 model_id, messages,
                 max_tokens=4096, temperature=0.4,
                 provider_name=model_name, purpose="factory_gen",
@@ -384,8 +383,8 @@ def build(
 
 
 def _score_artifacts(artifacts: list[Artifact]) -> None:
-    """LLM-score each artifact using gemini (cheapest)."""
-    scorer_model = MODELS.get("gemini-lite", "google/gemini-3.5-flash")
+    """LLM-score each artifact using gemini-lite (cheapest)."""
+    scorer_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")
 
     for art in artifacts:
         if not art.source or len(art.source) < 20:
@@ -396,10 +395,10 @@ def _score_artifacts(artifacts: list[Artifact]) -> None:
                 {"role": "system", "content": SCORER_SYSTEM},
                 {"role": "user", "content": f"Task: {art.description}\n\nCode:\n```\n{art.source[:3000]}\n```\n\nScore as JSON:"},
             ]
-            content, usage = call_openrouter(
+            content, usage = call_model(
                 scorer_model, messages,
                 max_tokens=128, temperature=0.0,
-                provider_name="gemini", purpose="factory_score",
+                provider_name="gemini-lite", purpose="factory_score",
             )
             # Extract JSON
             m = re.search(r'\{[^}]+\}', content)
@@ -430,7 +429,7 @@ def _save_artifacts(
     save_dir: Path | None,
 ) -> Path:
     """Save all artifacts to disk."""
-    base = save_dir or Path("C:/TheForge/output")
+    base = save_dir or (Path(__file__).resolve().parent.parent / "output")
     run_dir = base / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -668,9 +667,9 @@ def _heuristic_score(art: "Artifact") -> None:
     scores = [line_score, import_score, error_score, complexity_score]
     weights = [0.25, 0.20, 0.30, 0.25]
 
-    if _HAS_VITALIS and _vdll:
+    if _HAS_VITALIS and hotpath_weighted_score is not None:
         try:
-            total = _vdll.hotpath_weighted_score(scores, weights)
+            total = hotpath_weighted_score([s / 100.0 for s in scores], weights) * 100.0
         except Exception:
             total = sum(s * w for s, w in zip(scores, weights))
     else:
