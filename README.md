@@ -595,7 +595,7 @@ The Forge doesn't use vibes. Every comparison uses proper statistics:
 ```
 the-forge/
 ├── forge/
-│   ├── __init__.py           # Package exports (v2.0.0)
+│   ├── __init__.py           # Package exports (v2.3.0)
 │   ├── models.py             # Data models (Challenge, Submission, Score, etc.)
 │   ├── compiler.py           # Vitalis JIT integration (7-gate pipeline)
 │   ├── benchmark.py          # Welford stats, t-tests, outlier detection

@@ -16,7 +16,7 @@ from .skills import SkillDNA, certify_from_compilation
 from .marketplace import Marketplace, get_marketplace
 from .factory import build as factory_build, FactoryResult, ARTIFACT_TYPES
 
-__version__ = "2.0.0"
+__version__ = "2.3.0"
 __all__ = [
     # Core
     "Arena", "ArenaConfig",
