@@ -859,13 +859,18 @@ async function loadAuthKey() {
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
-    if (url.indexOf('/api/') !== -1 && url.indexOf('/api/auth-bootstrap') === -1) {
+    const isLocalForgeApi = (url.startsWith('/api/') || url.startsWith(window.location.origin + '/api/')) && url.indexOf('/api/auth-bootstrap') === -1;
+    if (isLocalForgeApi) {
       init = init || {};
       init.headers = Object.assign({}, init.headers, { 'X-Forge-Key': FORGE_KEY });
     }
     return origFetch(input, init);
   };
 })();
+
+function escapeHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 // ══════════════════════════════════════════════════════════════
 // INIT
@@ -879,6 +884,8 @@ async function init() {
       btn.classList.add('active');
       document.getElementById('panel-' + btn.dataset.panel).classList.add('active');
       if (btn.dataset.panel === 'dashboard') refreshDashboard();
+      if (btn.dataset.panel === 'antigravity') loadAgInbox();
+      if (btn.dataset.panel === 'trace') refreshTraceHUD();
     };
   });
   const input = document.getElementById('chatInput');
@@ -1758,8 +1765,8 @@ async function refreshDashboard() {
     // ── Vendor Routing Matrix ──
     const vmPanel = document.getElementById('dashVendorMatrix');
     if (vmPanel) {
-      const vendorList = ['openrouter','anthropic','openai','google','deepseek','ollama'];
-      const vendorIcons = {openrouter:'🔀',anthropic:'🟤',openai:'🟢',google:'🔵',deepseek:'🟣',ollama:'🦙'};
+      const vendorList = ['openrouter','anthropic','openai','google','deepseek','xai','ollama'];
+      const vendorIcons = {openrouter:'🔀',anthropic:'🟤',openai:'🟢',google:'🔵',deepseek:'🟣',xai:'⚡',ollama:'🦙'};
       let vmHtml = '';
       vendorList.forEach(name => {
         const v = vendors[name];
@@ -1847,15 +1854,15 @@ async function doSelfImprove() {
           <div class="rr-meta"><span>${data.patches_applied}/${data.patches_total} patches</span><span>$${(data.cost_usd || 0).toFixed(4)}</span></div>
         </div>
         <div class="rr-body" style="font-size:13px;line-height:1.8;">
-          <strong>Status:</strong> ${data.status}<br>
-          <strong>File:</strong> <code style="color:var(--or);background:rgba(249,115,22,0.06);padding:2px 8px;border-radius:4px;">${data.file}</code><br>
-          <strong>Instruction:</strong> ${instruction}
+          <strong>Status:</strong> ${escapeHtml(data.status)}<br>
+          <strong>File:</strong> <code style="color:var(--or);background:rgba(249,115,22,0.06);padding:2px 8px;border-radius:4px;">${escapeHtml(data.file)}</code><br>
+          <strong>Instruction:</strong> ${escapeHtml(instruction)}
         </div>
       </div>`;
     } else {
       results.innerHTML = `<div class="rr-card" style="border-color:rgba(239,68,68,0.3);">
         <div class="rr-header"><div class="rr-model" style="color:var(--rd);">❌ Patch Failed</div></div>
-        <div class="rr-body" style="color:var(--rd);">${data.error}</div>
+        <div class="rr-body" style="color:var(--rd);">${escapeHtml(data.error)}</div>
       </div>`;
     }
   } catch(e) {

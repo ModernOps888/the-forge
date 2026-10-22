@@ -39,7 +39,7 @@ def detect_running_ides() -> list[str]:
     try:
         import subprocess
         out = subprocess.check_output(
-            'tasklist /fo csv /nh', shell=True, text=True, timeout=3
+            ["tasklist", "/fo", "csv", "/nh"], shell=False, text=True, timeout=3
         )
         for proc_name, ide_name in IDE_PROCESSES.items():
             if proc_name.lower() in out.lower():
@@ -123,9 +123,21 @@ def forge_request(endpoint: str, data: dict | None = None, method: str = "GET") 
 
 def analyze_file(file_path: str, model: str = "gemini") -> str:
     """Send a file to Forge for AI analysis."""
-    path = Path(file_path)
+    path = Path(file_path).resolve()
     if not path.exists():
         return f"File not found: {file_path}"
+
+    project_root = Path(__file__).resolve().parent
+    try:
+        path.relative_to(project_root)
+        result = forge_request("/api/analyze-file", {
+            "file": str(path),
+            "model": model,
+        })
+        if "response" in result:
+            return result["response"]
+    except ValueError:
+        pass
 
     content = path.read_text(encoding="utf-8", errors="replace")
     
@@ -226,8 +238,13 @@ def unregister_context_menus():
 
 def create_tray_icon():
     """Create and run the system tray icon."""
-    import pystray
-    from PIL import Image, ImageDraw, ImageFont
+    try:
+        import pystray
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("  [Desktop] Optional dependencies 'pystray' and 'Pillow' are required for system tray mode.")
+        print("  [Desktop] Install with: pip install pystray Pillow plyer")
+        return
 
     # Generate a sleek Forge icon programmatically
     def make_icon():
@@ -354,7 +371,7 @@ def _quick_chat_dialog():
     # Model selector — dynamically fetch from API
     model_frame = tk.Frame(root, bg=bg)
     model_frame.pack(fill="x", padx=20)
-    tk.Label(model_frame, text="Model:", bg=bg, fg=tx, font=font_main).pack(side="left")
+    tk.Label(model_frame, text="Model:", bg=bg, fg=tx, font=font_main).grid(row=0, column=0, padx=(0, 6), sticky="w")
     model_var = tk.StringVar(value="gemini")
 
     # Fetch live model list from API
@@ -366,10 +383,12 @@ def _quick_chat_dialog():
     except Exception:
         pass
 
-    for m in model_names:
+    for idx, m in enumerate(model_names):
+        r_row = idx // 6
+        r_col = (idx % 6) + 1
         tk.Radiobutton(model_frame, text=m, variable=model_var, value=m,
                        bg=bg, fg=tx, selectcolor=card, font=("Segoe UI", 9),
-                       activebackground=bg, activeforeground=orange).pack(side="left", padx=4)
+                       activebackground=bg, activeforeground=orange).grid(row=r_row, column=r_col, padx=4, sticky="w")
 
     # Input
     input_frame = tk.Frame(root, bg=border, bd=1)

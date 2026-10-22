@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from typing import Optional
 
 
@@ -138,10 +138,9 @@ def certify_from_compilation(
     slug = name.lower().replace(" ", "_").replace("-", "_")
     mcp_name = f"forge_{slug}"
 
-    # Build MCP schemas from the signature
     input_schema, output_schema = _schemas_from_signature(signature)
 
-    return SkillDNA(
+    skill = SkillDNA(
         skill_id=f"{slug}_{uuid.uuid4().hex[:6]}",
         name=name,
         description=description,
@@ -164,14 +163,12 @@ def certify_from_compilation(
         mcp_input_schema=input_schema,
         mcp_output_schema=output_schema,
     )
+    register(skill)
+    return skill
 
 
 def _schemas_from_signature(sig: str) -> tuple[dict, dict]:
-    """
-    Parse a Vitalis function signature into JSON schemas for MCP.
-    e.g. "fn sort(arr: [i64]) -> [i64]" → input: {arr: array}, output: {result: array}
-    """
-    # Simple heuristic — sufficient for current Vitalis type system
+    """Parse a Vitalis function signature into JSON schemas for MCP."""
     type_map = {
         "i64": {"type": "integer"},
         "f64": {"type": "number"},
@@ -217,21 +214,34 @@ def _schemas_from_signature(sig: str) -> tuple[dict, dict]:
     return input_schema, output_schema
 
 
-# ── Global Registry (in-memory) ───────────────────────────────────────────────
+# ── Global Registry (in-memory, thread-safe) ──────────────────────────────────
 
 _registry: dict[str, SkillDNA] = {}
+_registry_lock = threading.RLock()
+
 
 def register(skill: SkillDNA) -> None:
-    _registry[skill.skill_id] = skill
+    with _registry_lock:
+        _registry[skill.skill_id] = skill
+
 
 def get(skill_id: str) -> Optional[SkillDNA]:
-    return _registry.get(skill_id)
+    with _registry_lock:
+        return _registry.get(skill_id)
+
 
 def all_skills() -> list[SkillDNA]:
-    return list(_registry.values())
+    with _registry_lock:
+        return list(_registry.values())
+
 
 def search(query: str) -> list[SkillDNA]:
     q = query.lower()
-    return [s for s in _registry.values()
-            if q in s.name.lower() or q in s.description.lower()
-            or any(q in t for t in s.tags) or q in s.category.lower()]
+    with _registry_lock:
+        return [
+            s for s in _registry.values()
+            if q in s.name.lower()
+            or q in s.description.lower()
+            or any(q in t.lower() for t in s.tags)
+            or q in s.category.lower()
+        ]

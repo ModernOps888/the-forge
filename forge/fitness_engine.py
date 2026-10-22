@@ -17,13 +17,8 @@ from __future__ import annotations
 
 import ast
 import re
-import subprocess
-import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
 
 
 # ── Score Result ──────────────────────────────────────────────────────────────
@@ -59,7 +54,7 @@ class VitalisFitnessReport:
     novelty:      DimensionScore = field(default_factory=lambda: DimensionScore(0, ""))
 
     scored_at_ms: float = 0.0
-    engine_version: str = "vitalis-fitness/1.0"
+    engine_version: str = "vitalis-fitness/2.4"
 
     @property
     def total(self) -> float:
@@ -109,8 +104,26 @@ def score(code: str, language: str = "auto") -> VitalisFitnessReport:
     """Score code across all 6 Vitalis fitness dimensions."""
     t0 = time.perf_counter()
 
-    if language == "auto":
+    if language == "auto" or not language:
         language = _detect_language(code)
+    else:
+        language = language.lower().strip()
+        if language in ("sl", ".sl", "vitalis"):
+            language = "vitalis"
+        elif language in ("tf", "terraform"):
+            language = "hcl"
+        elif language in ("yml", "github-actions"):
+            language = "yaml"
+        elif language in ("docker",):
+            language = "dockerfile"
+        elif language in ("ts", "tsx", "react"):
+            language = "typescript"
+        elif language in ("js", "jsx"):
+            language = "javascript"
+        elif language in ("py",):
+            language = "python"
+        elif language in ("rs",):
+            language = "rust"
 
     lines = len(code.split("\n"))
     tokens = len(code.split())
@@ -132,14 +145,24 @@ def score(code: str, language: str = "auto") -> VitalisFitnessReport:
 # ── Language Detection ─────────────────────────────────────────────────────────
 
 def _detect_language(code: str) -> str:
-    code_lower = code.lower()
-    if "def " in code and ("import " in code or "print(" in code):
+    stripped = code.strip()
+    if re.search(r"^\s*FROM\s+[a-zA-Z0-9._/:${}-]+", stripped, re.MULTILINE):
+        if any(kw in stripped for kw in ("RUN ", "COPY ", "ENTRYPOINT", "CMD ", "WORKDIR ", "EXPOSE ")):
+            return "dockerfile"
+    if any(kw in stripped for kw in ('resource "', 'provider "', 'terraform {', 'variable "', 'output "')):
+        return "hcl"
+    if re.search(r"^(name|on|jobs|services|apiVersion):\s*", stripped, re.MULTILINE) and "{" not in stripped[:120]:
+        return "yaml"
+    if "fn " in code and any(ret in code for ret in ("-> i64", "-> f64", "-> bool", "-> str", "-> [i64]")):
+        if "println!" not in code and "impl " not in code and "pub fn " not in code and "use std::" not in code:
+            return "vitalis"
+    if "def " in code and ("import " in code or "print(" in code or "return " in code):
         return "python"
-    if "fn " in code and ("->" in code or "let mut" in code or "impl " in code):
+    if "fn " in code and ("->" in code or "let mut" in code or "impl " in code or "pub fn" in code):
         return "rust"
-    if "func " in code and ("package " in code or "fmt." in code):
+    if "func " in code and ("package " in code or "fmt." in code or ":=" in code):
         return "go"
-    if ("const " in code or "let " in code or "interface " in code) and ("=>" in code or "async " in code):
+    if ("const " in code or "let " in code or "interface " in code or "export " in code) and ("=>" in code or "async " in code or "function " in code):
         return "typescript"
     if "#!/bin/bash" in code or ("echo " in code and "fi" in code):
         return "bash"
@@ -164,11 +187,6 @@ def _py_correctness(code: str) -> DimensionScore:
     except SyntaxError as e:
         return DimensionScore(0.05, f"Syntax error: {e}", ["SYNTAX_ERROR"])
 
-    # Check for undefined name patterns
-    if "NameError" in code:
-        flags.append("REFERENCES_NAMEERROR")
-        score -= 0.1
-
     # Check has at least one function/class
     has_func = any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for n in ast.walk(tree))
     if not has_func:
@@ -185,7 +203,8 @@ def _py_correctness(code: str) -> DimensionScore:
     # Check imports resolve to known-good stdlib
     good = {"os", "sys", "re", "json", "time", "math", "pathlib", "typing", "dataclasses",
             "collections", "itertools", "functools", "subprocess", "hashlib", "logging",
-            "argparse", "datetime", "threading", "asyncio", "http", "urllib"}
+            "argparse", "datetime", "threading", "asyncio", "http", "urllib", "hmac",
+            "secrets", "uuid", "sqlite3", "shutil", "tempfile", "zlib"}
     imports = [n.names[0].name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import)]
     from_imports = [n.module.split(".")[0] if n.module else "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     all_imports = set(imports + from_imports) - {""}
@@ -193,6 +212,11 @@ def _py_correctness(code: str) -> DimensionScore:
     if unknown:
         flags.append(f"THIRD_PARTY_IMPORTS: {', '.join(list(unknown)[:3])}")
         # Not a deduction — third-party is fine
+
+    # Check if `re.` functions are used without importing `re`
+    if re.search(r"\bre\.(search|match|findall|sub|compile|split)\b", code) and "re" not in all_imports:
+        flags.append("MISSING_IMPORT_RE")
+        score -= 0.1
 
     return DimensionScore(max(0.0, min(1.0, score)), "AST parse successful" if not flags else "; ".join(flags[:2]), flags)
 
@@ -205,18 +229,24 @@ def _py_performance(code: str) -> DimensionScore:
     except Exception:
         return DimensionScore(0.3, "Could not parse for performance analysis", [])
 
-    # Nested loops (O(n²) risk)
+    # Nested loops (O(n²) risk) and string += in loops
+    has_nested_loop = False
+    has_str_concat_in_loop = False
     for node in ast.walk(tree):
         if isinstance(node, (ast.For, ast.While)):
-            inner = any(
-                isinstance(n, (ast.For, ast.While))
-                for child in ast.iter_child_nodes(node)
-                for n in ast.walk(child)
-            )
-            if inner:
-                flags.append("NESTED_LOOPS (O(n²) risk)")
-                score -= 0.2
-                break
+            for child in ast.iter_child_nodes(node):
+                for n in ast.walk(child):
+                    if isinstance(n, (ast.For, ast.While)):
+                        has_nested_loop = True
+                    elif isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Add):
+                        if isinstance(n.value, (ast.Constant, ast.JoinedStr)) and (
+                            isinstance(n.value, ast.JoinedStr)
+                            or isinstance(getattr(n.value, "value", None), str)
+                        ):
+                            has_str_concat_in_loop = True
+    if has_nested_loop:
+        flags.append("NESTED_LOOPS (O(n²) risk)")
+        score -= 0.2
 
     # List comprehension vs append loop
     append_count = sum(1 for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "append")
@@ -226,12 +256,12 @@ def _py_performance(code: str) -> DimensionScore:
         score -= 0.1
 
     # Re-compiling regex in loops
-    if "re.compile" not in code and "re." in code:
+    if "re.compile" not in code and re.search(r"\bre\.(search|match|findall|sub|split)\s*\(", code):
         flags.append("REGEX_NOT_PRECOMPILED")
         score -= 0.05
 
     # String concatenation in loops
-    if "+=" in code and "str" in code.lower():
+    if has_str_concat_in_loop:
         flags.append("STRING_CONCAT (consider join())")
         score -= 0.05
 
@@ -276,7 +306,7 @@ def _py_code_quality(code: str) -> DimensionScore:
     # Line length
     long_lines = [i+1 for i, l in enumerate(code.split("\n")) if len(l) > 120]
     if long_lines:
-        flags.append(f"LONG_LINES (>{120} chars on lines {long_lines[:3]})")
+        flags.append(f"LONG_LINES (>120 chars on lines {long_lines[:3]})")
         score -= 0.05
 
     rationale = "Good code quality" if not flags else "; ".join(flags[:2])
@@ -369,6 +399,106 @@ def _py_efficiency(code: str) -> DimensionScore:
     return DimensionScore(max(0.0, min(1.0, score)), rationale, flags)
 
 
+# ── Vitalis .sl Scorer ─────────────────────────────────────────────────────────
+
+def _vitalis_correctness(code: str) -> DimensionScore:
+    flags = []
+    score = 1.0
+    if len(code.strip()) < 10:
+        return DimensionScore(0.0, "Empty or trivial code", ["TRIVIAL"])
+
+    try:
+        from .compiler import type_check, validate_safety
+        ok, errors = type_check(code)
+        if not ok:
+            flags.append(f"TYPE_CHECK_ERROR: {'; '.join(errors[:2])}")
+            score -= 0.35
+        safe_ok, violations = validate_safety(code)
+        if not safe_ok:
+            flags.append(f"SAFETY_VIOLATION: {'; '.join(violations[:2])}")
+            score -= 0.40
+    except Exception:
+        pass
+
+    if code.count("{") != code.count("}"):
+        flags.append("UNBALANCED_BRACES")
+        score -= 0.3
+    if "fn " not in code:
+        flags.append("NO_FUNCTION_DEFINITIONS")
+        score -= 0.25
+
+    rationale = "Vitalis AST & type check passed" if not flags else "; ".join(flags[:2])
+    return DimensionScore(max(0.0, min(1.0, score)), rationale, flags)
+
+
+# ── Declarative / Config Scorers (HCL, YAML, Dockerfile) ───────────────────────
+
+def _config_correctness(code: str) -> DimensionScore:
+    flags = []
+    score = 0.85
+    stripped = code.strip()
+    if len(stripped) < 10:
+        return DimensionScore(0.0, "Empty or trivial configuration", ["TRIVIAL"])
+
+    lang = _detect_language(code)
+    if lang == "dockerfile":
+        if not re.search(r"^\s*FROM\s+\S+", stripped, re.MULTILINE):
+            flags.append("MISSING_FROM_DIRECTIVE")
+            score -= 0.45
+        else:
+            score += 0.10
+        if re.search(r"^\s*(CMD|ENTRYPOINT)\s+", stripped, re.MULTILINE):
+            score += 0.05
+        else:
+            flags.append("MISSING_ENTRYPOINT_OR_CMD")
+            score -= 0.10
+    elif lang == "hcl":
+        if code.count("{") != code.count("}"):
+            flags.append("UNBALANCED_BRACES")
+            score -= 0.40
+        blocks = re.findall(r'\b(resource|provider|variable|output|locals|module|data|terraform)\b', code)
+        if blocks:
+            score += min(0.15, len(blocks) * 0.03)
+        else:
+            flags.append("NO_HCL_BLOCKS")
+            score -= 0.30
+    elif lang == "yaml":
+        if "\t" in code:
+            flags.append("YAML_TAB_INDENTATION")
+            score -= 0.25
+        keys = re.findall(r"^\s*[a-zA-Z0-9_-]+:\s*", code, re.MULTILINE)
+        if len(keys) >= 4:
+            score += 0.15
+        else:
+            flags.append("SPARSE_YAML_STRUCTURE")
+            score -= 0.20
+
+    rationale = "Valid configuration structure" if not flags else "; ".join(flags[:2])
+    return DimensionScore(max(0.0, min(1.0, score)), rationale, flags)
+
+
+def _config_performance(code: str) -> DimensionScore:
+    flags = []
+    score = 0.80
+    lang = _detect_language(code)
+    if lang == "dockerfile":
+        if re.search(r"FROM\s+\S+\s+AS\s+\w+", code, re.IGNORECASE):
+            score += 0.15
+            flags.append("MULTI_STAGE_BUILD")
+        if "--no-cache" in code or "rm -rf /var/lib/apt/lists" in code:
+            score += 0.05
+            flags.append("LAYER_CACHE_CLEANUP")
+    elif lang == "yaml":
+        if "cache" in code.lower() or "concurrency" in code.lower():
+            score += 0.15
+            flags.append("CI_CACHE_OR_CONCURRENCY")
+    elif lang == "hcl":
+        if "lifecycle" in code or "for_each" in code or "count" in code:
+            score += 0.15
+            flags.append("HCL_SCALABLE_META_ARGS")
+    return DimensionScore(max(0.0, min(1.0, score)), "Configuration performance check", flags)
+
+
 # ── Generic/Cross-language Scorers ─────────────────────────────────────────────
 
 def _generic_correctness(code: str) -> DimensionScore:
@@ -386,16 +516,22 @@ def _generic_correctness(code: str) -> DimensionScore:
         flags.append("UNBALANCED_PARENS")
         score -= 0.3
 
-    # Has function definition
-    has_fn = bool(re.search(r"\b(fn |func |function |def |sub |method )\w+\s*\(", code))
+    # Has function definition (supports Go receiver methods, generics, TS arrow functions)
+    has_fn = bool(
+        re.search(
+            r"(?:\b(?:fn|func|function|def|sub|method)\s+(?:\([^)]*\)\s*)?\w+\s*(?:<[^>]*>)?\s*\("
+            r"|\b(?:const|let|export\s+const|export\s+function)\s+\w+\s*(?:=\s*(?:async\s*)?\([^)]*\)\s*=>|\())",
+            code,
+        )
+    )
     if has_fn:
         score += 0.2
     else:
         flags.append("NO_FUNCTION_DEFINITIONS")
         score -= 0.1
 
-    # Has entry point
-    has_main = bool(re.search(r"\b(main|__name__|if __name__|async fn main|func main)\b", code))
+    # Has entry point or module export
+    has_main = bool(re.search(r"\b(main|__name__|if __name__|async fn main|func main|export default|pub fn)\b", code))
     if has_main:
         score += 0.1
 
@@ -451,9 +587,9 @@ def _generic_code_quality(code: str) -> DimensionScore:
             flags.append("POOR_DOCUMENTATION (<5% comment ratio)")
             score -= 0.1
 
-    # Naming convention (snake_case or camelCase consistency)
+    # Naming convention (snake_case vs true camelCase with internal uppercase transition)
     snake = len(re.findall(r"\b[a-z]+_[a-z]+\b", code))
-    camel = len(re.findall(r"\b[a-z][a-zA-Z]+\b", code))
+    camel = len(re.findall(r"\b[a-z]+[A-Z][a-zA-Z0-9]*\b", code))
     if snake > 5 and camel > 5:
         flags.append("MIXED_NAMING_CONVENTIONS")
         score -= 0.1
@@ -465,7 +601,7 @@ def _generic_code_quality(code: str) -> DimensionScore:
         score -= min(0.15, hacks * 0.05)
 
     # Has logging
-    if re.search(r"\b(log\.|logger\.|logging\.|console\.log|fmt\.Print|println!)\b", code):
+    if re.search(r"\b(log\.|logger\.|logging\.|console\.log|fmt\.Print|println!|tracing::)\b", code):
         score += 0.1
 
     # Long lines
@@ -486,7 +622,7 @@ def _generic_robustness(code: str) -> DimensionScore:
     error_patterns = [
         r"\b(try|catch|except|rescue|recover|defer|Result|Option|unwrap_or)\b",
         r"\b(throw|raise|panic|error|err\b)",
-        r"\b(if err != nil|if error|if e != nil)\b",
+        r"\b(if err != nil|if error|if e != nil|HEALTHCHECK|USER\s+\w+|validation\s*\{)\b",
     ]
     for p in error_patterns:
         if re.search(p, code):
@@ -498,9 +634,9 @@ def _generic_robustness(code: str) -> DimensionScore:
         score += 0.1
         flags.append("HAS_VALIDATION")
 
-    # Null/nil checks
+    # Null/nil checks (properly escaped `??`)
     if re.search(r"\b(nil|null|None|undefined|isEmpty|isNil)\b", code):
-        if re.search(r"\b(== nil|!= nil|== null|!= null|is None|is not None|??\s)", code):
+        if re.search(r"(?:==\s*nil|!=\s*nil|==\s*null|!=\s*null|\bis\s+None\b|\bis\s+not\s+None\b|\?\?\s)", code):
             score += 0.1
             flags.append("HAS_NULL_CHECKS")
 
@@ -510,7 +646,7 @@ def _generic_robustness(code: str) -> DimensionScore:
         flags.append("HAS_ARG_HANDLING")
 
     # Timeout/context
-    if re.search(r"\b(timeout|context|ctx|deadline|cancel)\b", code):
+    if re.search(r"\b(timeout|context|ctx|deadline|cancel|timeout-minutes)\b", code):
         score += 0.05
         flags.append("HAS_TIMEOUT_HANDLING")
 
@@ -553,7 +689,7 @@ def _score_novelty(code: str, language: str) -> DimensionScore:
     lines = [l.strip() for l in code.split("\n") if l.strip()]
     total = len(lines)
 
-    if total < 10:
+    if total < 6:
         return DimensionScore(0.1, "Too short to assess novelty", ["TRIVIAL"])
 
     # Boilerplate patterns that score low
@@ -576,11 +712,12 @@ def _score_novelty(code: str, language: str) -> DimensionScore:
         r"\bprotocol\b|\binterface\b",
         r"\bgeneric\b|<T>|\[T\]",     # generics
         r"\bfunctional\b|\.map\(|\.filter\(|\.reduce\(",
+        r"\bmerge_sorted\b|\binsertion_sort\b|\bslice\(",
     ]
     for p in novel_patterns:
         if re.search(p, code):
             score += 0.05
-            flags.append(f"USES_ADVANCED_PATTERN")
+            flags.append("USES_ADVANCED_PATTERN")
             if score >= 0.9:
                 break
 
@@ -594,7 +731,7 @@ def _score_novelty(code: str, language: str) -> DimensionScore:
     return DimensionScore(max(0.0, min(1.0, score)), rationale, list(set(flags))[:3])
 
 
-# ── Generic fallback set ───────────────────────────────────────────────────────
+# ── Scorer Sets ────────────────────────────────────────────────────────────────
 
 _generic_set = {
     "correctness":  _generic_correctness,
@@ -612,9 +749,28 @@ _python_set = {
     "efficiency":   _py_efficiency,
 }
 
-# Rust, Go, TypeScript, Bash all use generic with tuned weights
+_vitalis_set = {
+    "correctness":  _vitalis_correctness,
+    "performance":  _generic_performance,
+    "code_quality": _generic_code_quality,
+    "robustness":   _generic_robustness,
+    "efficiency":   _generic_efficiency,
+}
+
+_config_set = {
+    "correctness":  _config_correctness,
+    "performance":  _config_performance,
+    "code_quality": _generic_code_quality,
+    "robustness":   _generic_robustness,
+    "efficiency":   _generic_efficiency,
+}
+
 _SCORERS = {
     "python":     _python_set,
+    "vitalis":    _vitalis_set,
+    "hcl":        _config_set,
+    "yaml":       _config_set,
+    "dockerfile": _config_set,
     "generic":    _generic_set,
     "rust":       _generic_set,
     "go":         _generic_set,

@@ -1,25 +1,25 @@
 # The Forge — Enterprise Architecture Document
 
-**Version:** 1.0.0  
-**Date:** 2026-04-14  
-**Classification:** Internal Architecture Reference  
+**Version:** 2.4.0  
+**Date:** 2026-10-22  
+**Classification:** Architecture Reference  
 **Author:** Principal AI Systems Architect  
 
 ---
 
 ## 1. Executive Summary
 
-The Forge is a **compiler-powered agentic evolution platform** that orchestrates multiple Large Language Models (LLMs) in competitive code tournaments. Solutions are compiled through a real JIT compiler (Vitalis), benchmarked with statistical rigor, and evolved through biologically-inspired operators — producing code that exceeds the capability of any individual model.
+The Forge is a **compiler-powered agentic evolution platform** that orchestrates multiple Large Language Models (LLMs) in competitive code tournaments and an autonomous 17-type Agent Factory. Solutions are compiled through the Vitalis 7-gate pipeline (native Rust FFI, CLI, or sandboxed pure-Python `.sl` interpreter), benchmarked with statistical rigor, and evolved through biologically-inspired operators — producing code that exceeds the capability of any individual model.
 
-**Key Differentiator:** The Vitalis JIT compiler serves as an impartial, deterministic arbiter — providing type safety, capability sandboxing, and native-speed execution that no other agent framework offers.
+**Key Differentiator:** The Vitalis compiler pipeline serves as an impartial, deterministic arbiter — providing type safety, capability sandboxing, and sub-millisecond statistical evaluation that no other agent framework offers.
 
 **Core Metrics:**
-- Compile + execute latency: **<5ms** (FFI mode) / ~400ms (CLI fallback)
-- Statistical benchmark: **Welford online stats** with 95% CI and Welch's t-test
-- Selection math: **Native Rust hotpaths** — Boltzmann, Bayesian UCB, quantum annealing
-- Evolution: **6 strategies** — 3 crossover, 5 mutation operators, Lévy flight magnitudes
-- Multi-objective: **Pareto front** computation across 6 fitness dimensions
-- Diversity: **Shannon entropy** monitoring with convergence detection
+- Compile + execute latency: **<5ms** (FFI mode) / **<2ms** (sandboxed pure-Python `.sl` fallback) / ~400ms (CLI mode)
+- Statistical benchmark: **Welford online stats** with Student's $t$ 95% CI, Welch's $t$-test, and MAD outlier detection
+- Selection math: **Native Rust hotpaths + exact Python math fallbacks** — Boltzmann, Bayesian UCB1, quantum annealing
+- Evolution: **8 operators** — 3 crossover (`uniform`, `single_point`, `ast_aware`) + 5 mutation operators with Lévy flight magnitudes
+- Agent Factory: **17 artifact types** across 8 languages with policy-governed auto-deployment and Marketplace publishing
+- Governance: **SHA-256 hash-chained provenance**, 10-policy AST-aware `PolicyEngine`, and thread-safe `CircuitBreaker`
 
 ---
 
@@ -179,13 +179,13 @@ slang_dump_ir(source)          →  SSA IR dump
 | Quantum annealing | `hotpath_quantum_anneal_accept` | Accept regressions probabilistically to escape local optima |
 | Elite passthrough | Python sort | Top N pass unchanged (elitism) |
 
-**Crossover Operators (3):**
+**Crossover Operators (3 — Header/Body/Footer Isolated):**
 
 | Operator | Description |
 |----------|-------------|
-| Uniform | Each line randomly from parent A or B |
-| Single-point | Swap tails at a random body line |
-| Two-point | Swap a middle segment from B into A |
+| Uniform | Each inner body line randomly chosen from parent A or B (`_split_function` preserves signature & closing brace) |
+| Single-point | Swap inner body tails at a random body line |
+| AST-Aware | Swap entire brace-balanced logical blocks between parents |
 
 **Mutation Operators (5):**
 

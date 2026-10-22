@@ -17,7 +17,7 @@ Builds production-grade code artifacts in ANY language from natural language:
        error handling ratio, complexity estimate) — sub-µs via native Rust
     3. LLM scoring (Gemini, cheapest) for semantic quality
     4. Final score = 0.4*LLM + 0.6*heuristic (trust math over LLM)
-    5. Winner saved + registered to marketplace
+    5. Winner saved + deployed + registered to marketplace
 """
 
 from __future__ import annotations
@@ -164,6 +164,9 @@ class Artifact:
 
     def compute_total_score(self) -> float:
         """Combined score: 40% LLM judgment + 60% heuristic math (trust the compiler)."""
+        if not self.source or len(self.source.strip()) < 20:
+            self.score_total = 0.0
+            return 0.0
         llm_weights = {
             "correctness": 0.30,
             "completeness": 0.25,
@@ -179,8 +182,10 @@ class Artifact:
             + self.score_production * llm_weights["production"]
         )
         # Blend: trust heuristics more than LLM self-evaluation
-        if self.heuristic_total > 0:
+        if self.heuristic_total > 0 and llm_score > 0:
             self.score_total = 0.4 * llm_score + 0.6 * self.heuristic_total
+        elif self.heuristic_total > 0:
+            self.score_total = self.heuristic_total
         else:
             self.score_total = llm_score
         return self.score_total
@@ -342,9 +347,10 @@ def build(
         _heuristic_score(art)
 
     # LLM score each artifact (costs tokens but adds semantic judgment)
+    scorer_tokens = 0
     if score and artifacts:
-        print(f"  📊 LLM scoring {len(artifacts)} implementations (Gemini)...")
-        _score_artifacts(artifacts)
+        print(f"  📊 LLM scoring {len(artifacts)} implementations...")
+        scorer_tokens = _score_artifacts(artifacts)
 
     # Compute blended score
     for art in artifacts:
@@ -363,10 +369,27 @@ def build(
         artifacts=artifacts,
         winner=winner,
         total_cost=round(tracker.total_cost - cost_before, 6),
-        total_tokens=sum(a.tokens_used for a in artifacts),
+        total_tokens=sum(a.tokens_used for a in artifacts) + scorer_tokens,
         elapsed_s=round(time.time() - t0, 1),
         output_path=output_path,
     )
+
+    # Deploy project files and register winner in marketplace
+    try:
+        from .deployer import deploy as _deploy_result
+        dep_res = _deploy_result(result, target_dir=output_path / "project")
+        winner.files = {
+            p.name: p.read_text(encoding="utf-8", errors="replace")
+            for p in dep_res.output_path.iterdir() if p.is_file()
+        }
+    except Exception:
+        pass
+
+    try:
+        from .marketplace import get_marketplace
+        get_marketplace().publish_artifact(winner, run_id=run_id)
+    except Exception:
+        pass
 
     # Provenance
     provenance.record("factory_complete", run_id, "factory", {
@@ -382,13 +405,17 @@ def build(
     return result
 
 
-def _score_artifacts(artifacts: list[Artifact]) -> None:
-    """LLM-score each artifact using gemini-lite (cheapest)."""
-    scorer_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")
+def _score_artifacts(artifacts: list[Artifact]) -> int:
+    """LLM-score each artifact using the cheapest available model. Returns scorer tokens used."""
+    from .providers import _pick_available_model
+    scorer_name = _pick_available_model("gemini-lite", tier="simple")
+    scorer_model = MODELS.get(scorer_name, "google/gemini-3.8-flash")
+    total_scorer_tokens = 0
 
     for art in artifacts:
-        if not art.source or len(art.source) < 20:
-            art.score_total = 0
+        if not art.source or len(art.source.strip()) < 20:
+            art.heuristic_total = 0.0
+            art.score_total = 0.0
             continue
         try:
             messages = [
@@ -398,8 +425,9 @@ def _score_artifacts(artifacts: list[Artifact]) -> None:
             content, usage = call_model(
                 scorer_model, messages,
                 max_tokens=128, temperature=0.0,
-                provider_name="gemini-lite", purpose="factory_score",
+                provider_name=scorer_name, purpose="factory_score",
             )
+            total_scorer_tokens += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
             # Extract JSON
             m = re.search(r'\{[^}]+\}', content)
             if m:
@@ -411,13 +439,14 @@ def _score_artifacts(artifacts: list[Artifact]) -> None:
                 art.score_production = scores.get("production_ready", 70)
                 art.compute_total_score()
         except Exception:
-            # Fallback: simple heuristic scoring
-            art.score_correctness = 70
-            art.score_completeness = 60 if art.source else 0
+            # Fallback: deterministic heuristic scoring
+            art.score_correctness = 75
+            art.score_completeness = 70 if art.source else 0
             art.score_quality = min(90, len(art.source.split("\n")) * 0.5)
-            art.score_security = 70
-            art.score_production = 65
+            art.score_security = 75
+            art.score_production = 70
             art.compute_total_score()
+    return total_scorer_tokens
 
 
 def _save_artifacts(
@@ -459,8 +488,24 @@ def _save_artifacts(
 def _detect_type(description: str) -> str:
     """Heuristic type detection from description."""
     d = description.lower()
+    if any(k in d for k in ("full project", "full stack", "full-stack", "multi-file", "complete project", "monorepo")):
+        return "full_project"
+    if any(k in d for k in ("dockerfile", "docker-compose", "docker", "container")):
+        return "docker"
+    if any(k in d for k in ("github action", "ci/cd", "workflow yaml")):
+        return "workflow"
+    if any(k in d for k in ("terraform", "iac", "infra as code")):
+        return "terraform"
+    if any(k in d for k in ("vscode", "vs code", "extension", "cursor plugin")):
+        return "extension"
     if any(k in d for k in ("mcp server", "mcp tool", "mcp")):
         return "mcp_server"
+    if any(k in d for k in ("webhook", "callback")):
+        return "webhook"
+    if any(k in d for k in ("integration", "connector", "slack", "notion", "jira", "stripe")):
+        return "integration"
+    if any(k in d for k in ("sdk", "client library", "api client")):
+        return "sdk"
     if any(k in d for k in ("fastapi", "flask", "rest api", "api server", "http server")):
         return "api"
     if any(k in d for k in ("cli", "command line", "terminal tool")):
@@ -471,18 +516,6 @@ def _detect_type(description: str) -> str:
         return "go_service"
     if any(k in d for k in ("react", "next.js", "nextjs", "component")):
         return "react_app"
-    if any(k in d for k in ("terraform", "iac", "infra as code")):
-        return "terraform"
-    if any(k in d for k in ("sdk", "client library", "api client")):
-        return "sdk"
-    if any(k in d for k in ("webhook", "callback")):
-        return "webhook"
-    if any(k in d for k in ("github action", "ci/cd", "workflow yaml")):
-        return "workflow"
-    if any(k in d for k in ("dockerfile", "docker", "container")):
-        return "docker"
-    if any(k in d for k in ("vscode", "vs code", "extension", "cursor plugin")):
-        return "extension"
     if any(k in d for k in ("pipeline", "etl", "data processing")):
         return "pipeline"
     if any(k in d for k in (".sl", "vitalis", "sort function", "hot path")):
@@ -522,10 +555,36 @@ def _build_prompt(description: str, artifact_type: str, language: str, extra: st
             "configurable data source, transformation stages, validation, "
             "error recovery, progress tracking, output to multiple sinks."
         ),
+        "integration": (
+            "Build a complete third-party integration connector in Python. Include: "
+            "authenticated HTTP client, rate-limit backoff, webhook/event parsing, "
+            "idempotent sync operations, structured logging, env-var configuration."
+        ),
         "workflow": (
             "Write a complete GitHub Actions workflow YAML. Include: "
             "trigger events, job dependencies, caching, secrets handling, "
             "matrix builds if appropriate, artifact upload, deployment steps."
+        ),
+        "extension": (
+            "Write a complete VS Code extension in TypeScript. Include: "
+            "activate(context) and deactivate() lifecycle hooks, command registrations, "
+            "status bar items, configuration settings reader, error notifications."
+        ),
+        "docker": (
+            "Write a complete production Dockerfile. Include: "
+            "multi-stage build, non-root USER, layer caching, HEALTHCHECK, "
+            "minimal runtime image, EXPOSE, and ENTRYPOINT/CMD."
+        ),
+        "skill": (
+            "Write a complete Vitalis .sl hot-path function and main() entry point. "
+            "Rules: functions `fn name(param: type) -> return_type { body }`, "
+            "types `i64`, `f64`, `bool`, `str`, `[i64]`, variables `let x: i64 = 42;` or `let mut y: i64 = 0;`, "
+            "control flow `if cond { ... } else { ... }`, `while cond { ... }`, `for i in 0..n { ... }`."
+        ),
+        "full_project": (
+            "Build a complete, modular Python application architecture in a single runnable module. "
+            "Include domain models, service layer, CLI/HTTP entry point, configuration management, "
+            "structured logging, and built-in self-tests."
         ),
         "rust_lib": (
             "Write a complete Rust library crate. Include: "
@@ -579,17 +638,22 @@ Return ONLY the code."""
 
 
 def _extract_code(response: str, language: str) -> str:
-    """Extract code block from LLM response."""
-    # Try explicit language block first
-    for lang in (language, "python", "typescript", "yaml", ""):
-        fence = f"```{lang}"
-        if fence in response:
-            start = response.index(fence) + len(fence)
-            end = response.rfind("```")
-            if end > start:
-                return response[start:end].strip()
+    """Extract code block from LLM response, stripping any markdown fence tag."""
+    if not response:
+        return ""
+    m = re.search(r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n(.*?)```", response, re.DOTALL)
+    if m:
+        return m.group(1).strip()
 
-    # If no fences, return as-is (model obeyed "return only code")
+    # Fallback if unclosed fence
+    if response.strip().startswith("```"):
+        lines = response.strip().splitlines()
+        if len(lines) > 1:
+            body = "\n".join(lines[1:])
+            if body.endswith("```"):
+                body = body[:-3]
+            return body.strip()
+
     return response.strip()
 
 
@@ -608,14 +672,9 @@ def _heuristic_score(art: "Artifact") -> None:
     Score an artifact using deterministic heuristics.
     If Vitalis FFI is available, delegates statistical ops to native Rust hotpaths
     for sub-microsecond execution. Otherwise falls back to Python.
-    
-    Metrics:
-      - Line count score: rewards non-trivial implementations (50-500 lines sweet spot)
-      - Import density: % of lines that are imports (lower = better)
-      - Error handling: presence of try/except/catch/Result/Error
-      - Complexity: function/method count relative to LOC
     """
-    if not art.source or len(art.source) < 10:
+    if not art.source or len(art.source.strip()) < 20:
+        art.heuristic_total = 0.0
         return
 
     lines = art.source.split("\n")
@@ -624,13 +683,13 @@ def _heuristic_score(art: "Artifact") -> None:
 
     # 1. Line count score (bell curve: peak at ~200 lines)
     if loc < 20:
-        line_score = 30.0
+        line_score = 45.0
     elif loc < 50:
-        line_score = 50.0
+        line_score = 65.0
     elif loc < 150:
-        line_score = 75.0
+        line_score = 80.0
     elif loc < 400:
-        line_score = 90.0
+        line_score = 92.0
     elif loc < 800:
         line_score = 85.0
     else:
@@ -644,24 +703,24 @@ def _heuristic_score(art: "Artifact") -> None:
 
     # 3. Error handling density
     error_keywords = ("try", "except", "catch", "raise", "Error", "Result<", "unwrap",
-                      "panic", "error", "if err", "return err", "throw")
+                      "panic", "error", "if err", "return err", "throw", "HEALTHCHECK")
     error_lines = sum(1 for l in non_empty if any(k in l for k in error_keywords))
     error_ratio = error_lines / max(len(non_empty), 1)
     error_score = min(100.0, 50.0 + error_ratio * 500)  # reward error handling
 
     # 4. Function/method complexity (moderate is best)
     func_keywords = ("def ", "fn ", "func ", "function ", "async def ", "pub fn ",
-                     "class ", "struct ", "impl ", "type ", "interface ")
+                     "class ", "struct ", "impl ", "type ", "interface ", "resource ", "FROM ")
     func_count = sum(1 for l in non_empty if any(l.strip().startswith(k) for k in func_keywords))
     func_ratio = func_count / max(loc, 1) * 100
     if func_ratio < 2:
-        complexity_score = 50.0  # too monolithic
-    elif func_ratio < 8:
+        complexity_score = 60.0
+    elif func_ratio < 10:
         complexity_score = 90.0  # sweet spot
-    elif func_ratio < 15:
+    elif func_ratio < 18:
         complexity_score = 80.0
     else:
-        complexity_score = 60.0  # over-fragmented
+        complexity_score = 65.0  # over-fragmented
 
     # Use Vitalis native weighted_score if available (sub-µs)
     scores = [line_score, import_score, error_score, complexity_score]

@@ -14,11 +14,10 @@ Tracks:
 
 from __future__ import annotations
 
-import json
+import os
 import threading
 import time
-import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from . import compiler as _c     # hotpath EMA for trend tracking
@@ -115,9 +114,16 @@ class CostTracker:
     """
 
     def __init__(self, budget: Optional[BudgetConfig] = None):
-        self.budget = budget or BudgetConfig()
+        if budget is None:
+            default_max = 5.00
+            try:
+                default_max = float(os.environ.get("FORGE_BUDGET_USD", "5.00"))
+            except ValueError:
+                default_max = 5.00
+            budget = BudgetConfig(max_budget_usd=default_max)
+        self.budget = budget
         self.traces: list[RequestTrace] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._total_cost: float = 0.0
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
@@ -131,6 +137,11 @@ class CostTracker:
 
     def record(self, trace: RequestTrace) -> None:
         """Record a request trace and update running metrics."""
+        if not trace.timestamp:
+            trace.timestamp = time.time()
+        if trace.total_tokens <= 0:
+            trace.total_tokens = trace.input_tokens + trace.output_tokens
+
         # Calculate cost (local Ollama models are always free)
         if trace.vendor == "ollama" or (":" in trace.model_id and "/" not in trace.model_id):
             pricing = {"input": 0.0, "output": 0.0}
@@ -153,156 +164,185 @@ class CostTracker:
             self._request_count += 1
 
             # Per-provider tracking
-            p = trace.provider_name
+            p = trace.provider_name or trace.vendor or "unknown"
             self._provider_costs[p] = self._provider_costs.get(p, 0) + trace.cost_usd
             self._provider_tokens[p] = self._provider_tokens.get(p, 0) + trace.total_tokens
 
-            # EMA cost trend
-            self._cost_ema = _c.hotpath_ema_update(self._cost_ema, trace.cost_usd, 0.3)
-
-            # Cost spike detection
-            if (self.budget.alert_on_cost_spike
+            # Cost spike detection BEFORE updating EMA with the spike itself
+            if (
+                self.budget.alert_on_cost_spike
                 and self._request_count > 5
-                and trace.cost_usd > self._cost_ema * self.budget.cost_spike_threshold):
-                self._alert(f"⚠️  COST SPIKE: ${trace.cost_usd:.4f} "
-                           f"(EMA: ${self._cost_ema:.4f}) on {trace.model_id}")
+                and self._cost_ema > 0
+                and trace.cost_usd > self._cost_ema * self.budget.cost_spike_threshold
+            ):
+                self._alert(
+                    f"⚠️  COST SPIKE: ${trace.cost_usd:.4f} "
+                    f"(EMA: ${self._cost_ema:.4f}) on {trace.model_id}"
+                )
+
+            # EMA cost trend
+            if self._request_count == 1:
+                self._cost_ema = trace.cost_usd
+            else:
+                self._cost_ema = _c.hotpath_ema_update(self._cost_ema, trace.cost_usd, 0.3)
 
             # Budget check
             if self._total_cost >= self.budget.max_budget_usd:
                 self._budget_exhausted = True
-                self._alert(f"🛑 BUDGET EXHAUSTED: ${self._total_cost:.4f} "
-                           f">= ${self.budget.max_budget_usd:.2f}")
-
+                self._alert(
+                    f"🛑 BUDGET EXHAUSTED: ${self._total_cost:.4f} "
+                    f">= ${self.budget.max_budget_usd:.2f}"
+                )
             elif self._total_cost >= self.budget.max_budget_usd * self.budget.warning_threshold_pct:
-                self._alert(f"⚠️  BUDGET WARNING: ${self._total_cost:.4f} "
-                           f"({self.pct_used:.0%} of ${self.budget.max_budget_usd:.2f})")
+                self._alert(
+                    f"⚠️  BUDGET WARNING: ${self._total_cost:.4f} "
+                    f"({self.pct_used:.0%} of ${self.budget.max_budget_usd:.2f})"
+                )
+
+    def reset(self) -> None:
+        """Reset tracked traces and costs."""
+        with self._lock:
+            self.traces.clear()
+            self._total_cost = 0.0
+            self._total_input_tokens = 0
+            self._total_output_tokens = 0
+            self._cost_ema = 0.0
+            self._provider_costs.clear()
+            self._provider_tokens.clear()
+            self._request_count = 0
+            self._budget_exhausted = False
 
     # ── Budget Queries ────────────────────────────────────────────────────
 
     @property
     def is_exhausted(self) -> bool:
-        return self._budget_exhausted
+        with self._lock:
+            return self._budget_exhausted
 
     @property
     def total_cost(self) -> float:
-        return self._total_cost
+        with self._lock:
+            return self._total_cost
 
     @property
     def remaining_budget(self) -> float:
-        return max(0, self.budget.max_budget_usd - self._total_cost)
+        with self._lock:
+            return max(0.0, self.budget.max_budget_usd - self._total_cost)
 
     @property
     def pct_used(self) -> float:
-        return self._total_cost / self.budget.max_budget_usd if self.budget.max_budget_usd > 0 else 0
+        with self._lock:
+            return self._total_cost / self.budget.max_budget_usd if self.budget.max_budget_usd > 0 else 0.0
 
     @property
     def total_tokens(self) -> int:
-        return self._total_input_tokens + self._total_output_tokens
+        with self._lock:
+            return self._total_input_tokens + self._total_output_tokens
 
     # ── Analytics ──────────────────────────────────────────────────────────
 
     def cost_per_provider(self) -> dict[str, dict]:
         """Cost breakdown per provider."""
-        result = {}
-        for p in self._provider_costs:
-            calls = sum(1 for t in self.traces if t.provider_name == p)
-            result[p] = {
-                "total_cost": round(self._provider_costs[p], 6),
-                "total_tokens": self._provider_tokens[p],
-                "calls": calls,
-                "avg_cost_per_call": round(self._provider_costs[p] / max(calls, 1), 6),
-                "avg_tokens_per_call": self._provider_tokens[p] // max(calls, 1),
-            }
-        return result
+        with self._lock:
+            result = {}
+            for p in self._provider_costs:
+                calls = sum(1 for t in self.traces if (t.provider_name or t.vendor or "unknown") == p)
+                result[p] = {
+                    "total_cost": round(self._provider_costs[p], 6),
+                    "total_tokens": self._provider_tokens[p],
+                    "calls": calls,
+                    "avg_cost_per_call": round(self._provider_costs[p] / max(calls, 1), 6),
+                    "avg_tokens_per_call": self._provider_tokens[p] // max(calls, 1),
+                }
+            return result
 
     def cost_per_generation(self) -> dict[int, float]:
         """Cost accumulated per generation."""
-        gens: dict[int, float] = {}
-        for t in self.traces:
-            if t.generation >= 0:
-                gens[t.generation] = gens.get(t.generation, 0) + t.cost_usd
-        return {k: round(v, 6) for k, v in sorted(gens.items())}
+        with self._lock:
+            gens: dict[int, float] = {}
+            for t in self.traces:
+                if t.generation >= 0:
+                    gens[t.generation] = gens.get(t.generation, 0) + t.cost_usd
+            return {k: round(v, 6) for k, v in sorted(gens.items())}
 
     def cheapest_provider(self) -> str:
         """Provider with lowest cost per token."""
-        best = ""
-        best_cpt = float("inf")
-        for p in self._provider_costs:
-            tokens = self._provider_tokens.get(p, 1)
-            cpt = self._provider_costs[p] / tokens
-            if cpt < best_cpt:
-                best_cpt = cpt
-                best = p
-        return best
+        with self._lock:
+            best = ""
+            best_cpt = float("inf")
+            for p in self._provider_costs:
+                tokens = max(self._provider_tokens.get(p, 1), 1)
+                cpt = self._provider_costs[p] / tokens
+                if cpt < best_cpt:
+                    best_cpt = cpt
+                    best = p
+            return best
 
     def optimization_hints(self) -> list[str]:
         """Return actionable cost optimization suggestions."""
-        hints = []
+        with self._lock:
+            hints = []
 
-        # Check if we're using expensive models for simple tasks
-        for p, data in self.cost_per_provider().items():
-            pricing = PRICING.get(
-                next((t.model_id for t in self.traces if t.provider_name == p), ""),
-                {"input": 0, "output": 0}
-            )
-            if pricing["output"] > 5.0 and data["calls"] > 10:
+            for p, data in self.cost_per_provider().items():
+                pricing = PRICING.get(
+                    next((t.model_id for t in self.traces if t.provider_name == p), ""),
+                    {"input": 0, "output": 0}
+                )
+                if pricing["output"] > 5.0 and data["calls"] > 10:
+                    hints.append(
+                        f"Consider using a cheaper model for '{p}' — "
+                        f"${pricing['output']}/M output tokens, {data['calls']} calls"
+                    )
+
+            for t in self.traces[-10:]:
+                if t.output_tokens > 500 and t.response_chars < 200:
+                    hints.append(
+                        f"Model {t.provider_name} returned {t.output_tokens} tokens "
+                        f"but only {t.response_chars} useful chars — consider stricter max_tokens"
+                    )
+
+            avg_input = self._total_input_tokens / max(self._request_count, 1)
+            if avg_input > 800:
                 hints.append(
-                    f"Consider using a cheaper model for '{p}' — "
-                    f"${pricing['output']}/M output tokens, {data['calls']} calls"
+                    f"Average input is {avg_input:.0f} tokens — "
+                    f"consider shortening system prompt"
                 )
 
-        # Check output token waste
-        for t in self.traces[-10:]:
-            if t.output_tokens > 500 and t.response_chars < 200:
-                hints.append(
-                    f"Model {t.provider_name} returned {t.output_tokens} tokens "
-                    f"but only {t.response_chars} useful chars — consider stricter max_tokens"
-                )
-
-        # Prompt size optimization
-        avg_input = self._total_input_tokens / max(self._request_count, 1)
-        if avg_input > 800:
-            hints.append(
-                f"Average input is {avg_input:.0f} tokens — "
-                f"consider shortening system prompt"
-            )
-
-        return hints
+            return hints
 
     # ── Reporting ──────────────────────────────────────────────────────────
 
     def summary(self) -> str:
         """Human-readable cost summary."""
-        lines = [
-            f"{'═' * 55}",
-            f"  💰  COST & TOKEN REPORT",
-            f"{'─' * 55}",
-            f"  Total cost     : ${self._total_cost:.4f} / ${self.budget.max_budget_usd:.2f} ({self.pct_used:.0%})",
-            f"  Remaining      : ${self.remaining_budget:.4f}",
-            f"  Total tokens   : {self.total_tokens:,} ({self._total_input_tokens:,} in / {self._total_output_tokens:,} out)",
-            f"  Total requests : {self._request_count}",
-            f"  Avg cost/req   : ${self._total_cost / max(self._request_count, 1):.6f}",
-            f"  Cost EMA       : ${self._cost_ema:.6f}",
-            f"{'─' * 55}",
-        ]
+        with self._lock:
+            lines = [
+                f"{'═' * 55}",
+                f"  💰  COST & TOKEN REPORT",
+                f"{'─' * 55}",
+                f"  Total cost     : ${self._total_cost:.4f} / ${self.budget.max_budget_usd:.2f} ({self.pct_used:.0%})",
+                f"  Remaining      : ${self.remaining_budget:.4f}",
+                f"  Total tokens   : {self.total_tokens:,} ({self._total_input_tokens:,} in / {self._total_output_tokens:,} out)",
+                f"  Total requests : {self._request_count}",
+                f"  Avg cost/req   : ${self._total_cost / max(self._request_count, 1):.6f}",
+                f"  Cost EMA       : ${self._cost_ema:.6f}",
+                f"{'─' * 55}",
+            ]
 
-        # Per-provider breakdown
-        for p, data in self.cost_per_provider().items():
-            lines.append(
-                f"  {p:12s} │ ${data['total_cost']:.4f} │ "
-                f"{data['total_tokens']:>6,} tok │ {data['calls']} calls"
-            )
+            for p, data in self.cost_per_provider().items():
+                lines.append(
+                    f"  {p:12s} │ ${data['total_cost']:.4f} │ "
+                    f"{data['total_tokens']:>6,} tok │ {data['calls']} calls"
+                )
 
-        # Optimization hints
-        hints = self.optimization_hints()
-        if hints:
-            lines.append(f"{'─' * 55}")
-            lines.append(f"  💡  Optimization hints:")
-            for h in hints:
-                lines.append(f"     • {h}")
+            hints = self.optimization_hints()
+            if hints:
+                lines.append(f"{'─' * 55}")
+                lines.append(f"  💡  Optimization hints:")
+                for h in hints:
+                    lines.append(f"     • {h}")
 
-        lines.append(f"{'═' * 55}")
-        return "\n".join(lines)
+            lines.append(f"{'═' * 55}")
+            return "\n".join(lines)
 
     # ── Internals ──────────────────────────────────────────────────────────
 
@@ -310,16 +350,13 @@ class CostTracker:
         print(f"  [BudgetTracker] {message}")
 
 
+BudgetTracker = CostTracker
+
+
 # ── Token Estimation ──────────────────────────────────────────────────────────
 
 def estimate_tokens(text: str) -> int:
-    """Code-aware token estimator.
-    
-    Plain English averages ~4 chars/token with most BPE tokenizers.
-    Source code (Rust, Python, Vitalis .sl) averages ~3 chars/token because
-    symbols like { } [ ] < > ; : are individual tokens.
-    We detect symbol density and adjust dynamically.
-    """
+    """Code-aware token estimator."""
     if not text:
         return 1
     symbol_count = sum(1 for c in text if c in '{}[]<>;:()=+*/\\|&!@#$%^~`"\'')
@@ -329,11 +366,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def estimate_cost_preview(text: str, model_id: str, direction: str = "input") -> float:
-    """Pre-flight cost estimate before making an API call.
-    
-    Returns estimated cost in USD for the given text at the given model's pricing.
-    Useful for budget guard checks before expensive operations.
-    """
+    """Pre-flight cost estimate before making an API call."""
     tokens = estimate_tokens(text)
     if ":" in model_id and "/" not in model_id:
         pricing = {"input": 0.0, "output": 0.0}
@@ -347,9 +380,14 @@ def estimate_cost_preview(text: str, model_id: str, direction: str = "input") ->
 
 _tracker: Optional[CostTracker] = None
 
+
 def get_tracker(budget: Optional[BudgetConfig] = None) -> CostTracker:
-    """Get or create the global cost tracker."""
+    """Get or create the global cost tracker. Updates budget config if explicitly passed."""
     global _tracker
     if _tracker is None:
         _tracker = CostTracker(budget)
+    elif budget is not None:
+        with _tracker._lock:
+            _tracker.budget = budget
+            _tracker._budget_exhausted = _tracker._total_cost >= budget.max_budget_usd
     return _tracker

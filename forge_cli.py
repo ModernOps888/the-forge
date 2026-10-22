@@ -22,12 +22,21 @@ import sys
 import time
 from pathlib import Path
 
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from forge import Arena, ArenaConfig, Challenge, compile_and_run, type_check, lex
 from forge.arena import mock_provider
 from forge.providers import (
     openrouter_provider, ollama_provider, MODELS, test_provider,
     chat, multi_agent_research, consensus, auto_route,
     call_model, call_openrouter, _is_local_model, get_vendor_status,
+    _pick_available_model,
 )
 from forge.budget import get_tracker, BudgetConfig
 from forge.factory import build as factory_build, ARTIFACT_TYPES
@@ -42,9 +51,14 @@ BANNER = r"""
 
 
 def _require_provider_key(models: list[str] | None = None) -> None:
-    """Ensure at least one cloud API key is configured (unless all requested models are local)."""
-    if models and all(_is_local_model(m) for m in models):
-        return
+    """Validate requested model aliases and ensure at least one required API key is configured."""
+    if models:
+        for m in models:
+            if m not in MODELS and "/" not in m:
+                print(f"⚠️  Unknown model '{m}', available: {list(MODELS.keys())}")
+                sys.exit(1)
+        if all(_is_local_model(m) for m in models):
+            return
     if os.environ.get("OPENROUTER_API_KEY", ""):
         return
     status = get_vendor_status()
@@ -194,11 +208,18 @@ def cmd_test_providers(args):
 # COMPILE / CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _read_source_or_inline(raw: str) -> str:
+    try:
+        p = Path(raw)
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return raw
+
+
 def cmd_compile(args):
-    if Path(args.source).exists():
-        source = Path(args.source).read_text(encoding="utf-8")
-    else:
-        source = args.source
+    source = _read_source_or_inline(args.source)
 
     print(f"🔨 Compiling via Vitalis...")
     result = compile_and_run(source)
@@ -213,10 +234,7 @@ def cmd_compile(args):
 
 
 def cmd_check(args):
-    if Path(args.source).exists():
-        source = Path(args.source).read_text(encoding="utf-8")
-    else:
-        source = args.source
+    source = _read_source_or_inline(args.source)
     result = type_check(source)
     print(f"{'✅ OK' if result.success else '❌ Fail'} ({result.compile_time_ms:.0f}ms)")
     if result.error:
@@ -263,7 +281,7 @@ def _safe_slug(name: str) -> str:
 
 def _save_results(tournament, challenge):
     if tournament.champion:
-        tools_dir = Path("tools")
+        tools_dir = Path(__file__).resolve().parent / "tools"
         tools_dir.mkdir(exist_ok=True)
         tools_dir_resolved = tools_dir.resolve()
         slug = _safe_slug(challenge.name)
@@ -432,6 +450,7 @@ def cmd_budget(args):
 
 def cmd_build(args):
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    _require_provider_key(models)
     result = factory_build(
         description=args.description,
         artifact_type=args.type,
@@ -461,11 +480,13 @@ def cmd_build(args):
 def cmd_orchestrate(args):
     """Use a Master LLM to design a challenge, then let local SLMs solve it."""
     print(BANNER)
-    _require_provider_key(["claude"])
+    model_names = [m.strip() for m in args.models.split(",") if m.strip()]
+    planner = _pick_available_model("claude", tier="hard")
+    _require_provider_key([planner] + model_names)
 
     print(f"🧠 Master Orchestrator: Planning challenge...")
     print(f"   Task: {args.task}")
-    print(f"   Generating challenge via Claude...")
+    print(f"   Generating challenge via {planner}...")
 
     prompt = (
         "You are the Master Orchestrator for The Forge. "
@@ -485,10 +506,10 @@ def cmd_orchestrate(args):
 
     try:
         content, _ = call_model(
-            MODELS["claude"],
+            MODELS.get(planner, MODELS["claude"]),
             [{"role": "user", "content": prompt}],
             max_tokens=1500,
-            provider_name="claude",
+            provider_name=planner,
             purpose="orchestrate"
         )
         content = content.replace("```json", "").replace("```", "").strip()

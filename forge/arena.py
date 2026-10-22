@@ -5,7 +5,7 @@ The full tournament loop — everything wired together:
   - Multi-LLM seeding via pluggable provider functions
   - Vitalis 7-gate compiler as impartial judge
   - Multi-objective fitness: correctness, speed, quality, robustness, novelty
-  - Adaptive fitness weights that shift per generation (native Rust)
+  - Adaptive fitness weights that shift per generation (native Rust or Python math)
   - Pareto front selection for multi-objective optimization
   - Boltzmann + Bayesian UCB + quantum-annealed evolution
   - Lévy-flight mutations for heavy-tailed exploration
@@ -17,26 +17,25 @@ The full tournament loop — everything wired together:
 
 from __future__ import annotations
 
-import time
-import random
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .models import (
     Challenge, Submission, Generation, Tournament,
     Provider, SubmissionStatus, FitnessScore,
-    BenchmarkResult, CompilationResult,
+    CompilationGate, CompilationResult,
 )
 from . import compiler as _c
 from .benchmark import (
     compute_benchmark, compute_fitness_performance, adaptive_fitness_score,
     native_code_quality, compute_pareto_front, measure_diversity,
-    weighted_composite, FitnessTrend, welch_t_test,
+    FitnessTrend,
 )
 from .evolution import (
     EvolutionConfig, evolve_generation, code_novelty, code_fingerprint,
-    elite_select,
 )
+from .governance import get_provenance
 
 ProviderFn = Callable[[str, str], str]
 
@@ -67,33 +66,66 @@ class ArenaConfig:
     verbose: bool = True
     use_vitalis_native_evo: bool = True   # dual-track with slang_evo_* engine
 
+    def weights_dict(self) -> dict[str, float]:
+        return {
+            "correctness": self.weight_correctness,
+            "performance": self.weight_performance,
+            "code_quality": self.weight_quality,
+            "robustness": self.weight_robustness,
+            "efficiency": self.weight_efficiency,
+            "novelty": self.weight_novelty,
+        }
+
 
 # ── Provider Registry Helpers ─────────────────────────────────────────────────
 
 def mock_provider(name: str) -> ProviderFn:
     """
-    Mock LLM provider — returns structurally valid .sl code with different
-    algorithmic styles per provider. Used for testing without API keys.
+    Mock LLM provider — returns structurally valid, self-contained .sl code
+    with different algorithmic styles per provider. Adapts to array or scalar signatures.
     """
-    import re
+    def _parse_sig(sig: str) -> tuple[str, list[tuple[str, str]], str]:
+        m = re.search(r"\bfn\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^{]+))?", sig)
+        if not m:
+            return "solve", [("n", "i64")], "i64"
+        fn_name = m.group(1)
+        raw_params = m.group(2).strip()
+        ret_type = (m.group(3) or "i64").strip()
+        params: list[tuple[str, str]] = []
+        if raw_params:
+            for p in raw_params.split(","):
+                p = p.strip()
+                if not p:
+                    continue
+                if ":" in p:
+                    pn, pt = p.split(":", 1)
+                    params.append((pn.replace("mut ", "").strip(), pt.strip()))
+                else:
+                    params.append((p.replace("mut ", "").strip(), "i64"))
+        return fn_name, params, ret_type
 
-    styles = {
-        "claude": (
-            "recursive, elegant, with guard clauses",
-            lambda sig: f"""{sig} {{
-    // claude: elegant recursive approach
-    if arr.len() < 2 {{ return arr; }}
-    let mid: i64 = arr.len() / 2;
-    let left: [i64] = sort(arr.slice(0, mid));
-    let right: [i64] = sort(arr.slice(mid, arr.len()));
+    def _generate(description: str, signature: str) -> str:
+        sig = signature.strip().rstrip("{").strip()
+        fn_name, params, ret_type = _parse_sig(sig)
+        first_param = params[0][0] if params else "arr"
+        first_type = params[0][1] if params else "[i64]"
+        desc_lower = (description or "").lower()
+
+        # Array sorting / array processing challenge
+        if "[" in first_type or "[" in ret_type:
+            if name.startswith("claude"):
+                return f"""{sig} {{
+    // claude: recursive merge sort
+    if {first_param}.len() < 2 {{ return {first_param}; }}
+    let mid: i64 = {first_param}.len() / 2;
+    let left: [i64] = {fn_name}({first_param}.slice(0, mid));
+    let right: [i64] = {fn_name}({first_param}.slice(mid, {first_param}.len()));
     merge_sorted(left, right)
 }}"""
-        ),
-        "gpt": (
-            "iterative, brute-force, explicit loops",
-            lambda sig: f"""{sig} {{
-    // gpt: in-place selection sort
-    let mut result: [i64] = arr;
+            if name.startswith("gpt") or name.startswith("o3"):
+                return f"""{sig} {{
+    // gpt: iterative in-place selection sort
+    let mut result: [i64] = {first_param};
     let n: i64 = result.len();
     let mut i: i64 = 0;
     while i < n {{
@@ -110,36 +142,58 @@ def mock_provider(name: str) -> ProviderFn:
     }}
     result
 }}"""
-        ),
-        "gemini": (
-            "hybrid pivot-based partitioning",
-            lambda sig: f"""{sig} {{
-    // gemini: quicksort-style partition
-    if arr.len() < 10 {{ return insertion_sort(arr); }}
-    let pivot: i64 = arr.get(arr.len() / 2);
+            if name.startswith("gemini"):
+                return f"""{sig} {{
+    // gemini: hybrid pivot-based quicksort
+    if {first_param}.len() < 2 {{ return {first_param}; }}
+    let pivot: i64 = {first_param}.get({first_param}.len() / 2);
     let mut lo: [i64] = [];
     let mut hi: [i64] = [];
     let mut eq: [i64] = [];
-    for x in arr {{
+    for x in {first_param} {{
         if x < pivot {{ lo = lo.push(x); }}
         else {{ if x > pivot {{ hi = hi.push(x); }} else {{ eq = eq.push(x); }} }}
     }}
-    array_concat(array_concat(sort(lo), eq), sort(hi))
+    array_concat(array_concat({fn_name}(lo), eq), {fn_name}(hi))
 }}"""
-        ),
-        "local": (
-            "stub",
-            lambda sig: f"""{sig} {{
-    arr
+            if name.startswith("deepseek"):
+                return f"""{sig} {{
+    // deepseek: insertion sort
+    insertion_sort({first_param})
 }}"""
-        ),
-    }
+            return f"""{sig} {{
+    insertion_sort({first_param})
+}}"""
 
-    style_name, generator = styles.get(name, styles["local"])
+        # Fibonacci challenge
+        if "fib" in fn_name.lower() or "fibonacci" in desc_lower:
+            return f"""{sig} {{
+    if {first_param} <= 0 {{ return 0; }}
+    if {first_param} == 1 {{ return 1; }}
+    let mut a: i64 = 0;
+    let mut b: i64 = 1;
+    let mut i: i64 = 2;
+    while i <= {first_param} {{
+        let next: i64 = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
+    }}
+    b
+}}"""
 
-    def _generate(description: str, signature: str) -> str:
-        sig = signature.strip().rstrip("{").strip()
-        return generator(sig)
+        # Two-parameter scalar challenge (e.g. fn add(a: i64, b: i64) -> i64)
+        if len(params) >= 2:
+            p0, p1 = params[0][0], params[1][0]
+            return f"""{sig} {{
+    {p0} + {p1}
+}}"""
+
+        # Default single-parameter scalar challenge
+        return f"""{sig} {{
+    if {first_param} < 0 {{ return 0; }}
+    {first_param}
+}}"""
 
     return _generate
 
@@ -149,15 +203,6 @@ def mock_provider(name: str) -> ProviderFn:
 class Arena:
     """
     The Forge tournament engine.
-    
-    1. Seed from N LLM providers
-    2. Evaluate through 7 Vitalis compiler gates
-    3. Score on 6 adaptive fitness dimensions
-    4. Compute Pareto front for multi-objective selection
-    5. Evolve: Boltzmann + Bayesian UCB + quantum annealing + Lévy mutations
-    6. Monitor diversity via Shannon entropy
-    7. Dual-track: also register champions with Vitalis native evolution engine
-    8. Repeat until convergence or max generations
     """
 
     def __init__(self, config: Optional[ArenaConfig] = None):
@@ -176,8 +221,9 @@ class Arena:
 
     def run(self, challenge: Challenge) -> Tournament:
         """Execute a full evolutionary tournament. Returns complete Tournament."""
-        _c._ensure_ffi()   # warm up DLL
+        _c._ensure_ffi()   # warm up DLL if available
         vitalis_ver = _c.vitalis_version()
+        prov_chain = get_provenance()
 
         tournament = Tournament(
             challenge=challenge,
@@ -186,6 +232,18 @@ class Arena:
             population_size=self.config.population_size,
             elite_count=self.config.elite_count,
             status="running",
+        )
+
+        prov_chain.record(
+            "tournament_start",
+            tournament.id,
+            "arena",
+            {
+                "challenge_id": challenge.id,
+                "challenge_name": challenge.name,
+                "providers": list(self.providers.keys()),
+                "max_generations": self.config.max_generations,
+            },
         )
 
         if self.config.verbose:
@@ -200,7 +258,7 @@ class Arena:
             print(f"  {'─'*4}  {'─'*7}  {'─'*7}  {'─'*10}  {'─'*10}  {'─'*20}")
 
         # ── Generation 0: Seed from LLMs ──────────────────────────────
-        gen_0 = self._seed_generation(challenge)
+        gen_0 = self._seed_generation(challenge, tournament.id)
         tournament.generations.append(gen_0)
         self._log_gen(gen_0, [])
 
@@ -208,7 +266,6 @@ class Arena:
             tournament.status = "failed_no_submissions"
             return tournament
 
-        # Register champion with Vitalis native evolution engine
         self._vitalis_evo_register(challenge, gen_0)
 
         # ── Generations 1–N: Evolve ────────────────────────────────────
@@ -219,7 +276,6 @@ class Arena:
             prev = tournament.generations[-1]
             all_sources = [s.source_code for s in prev.submissions if s.fitness]
 
-            # Evolve next generation
             offspring = evolve_generation(
                 parents=prev.submissions,
                 challenge_id=challenge.id,
@@ -228,19 +284,15 @@ class Arena:
                 trial_counts=self._trial_counts,
             )
 
-            # Evaluate
-            gen = self._evaluate_generation(offspring, challenge, gen_num, all_sources)
+            gen = self._evaluate_generation(offspring, challenge, gen_num, all_sources, tournament.id)
             tournament.generations.append(gen)
 
-            # EMA trend and diversity
             ema = self._trend.update(gen.champion_fitness)
             diversity = measure_diversity([s.fitness.total for s in gen.submissions if s.fitness])
             self._log_gen(gen, all_sources, diversity=diversity, ema=ema)
 
-            # Register champion with native Vitalis engine
             self._vitalis_evo_register(challenge, gen)
 
-            # Convergence check
             if gen.champion_fitness > best_fitness + self.config.convergence_delta:
                 best_fitness = gen.champion_fitness
                 stale = 0
@@ -256,6 +308,20 @@ class Arena:
         if tournament.status == "running":
             tournament.status = "completed"
 
+        if tournament.champion and tournament.champion.fitness:
+            prov_chain.record(
+                "promotion",
+                tournament.id,
+                "arena",
+                {
+                    "champion_id": tournament.champion.id,
+                    "provider": tournament.champion.provider.value,
+                    "fitness": round(tournament.champion.fitness.total, 2),
+                    "generations": len(tournament.generations),
+                    "status": tournament.status,
+                },
+            )
+
         if self.config.verbose:
             self._log_final(tournament)
 
@@ -263,26 +329,25 @@ class Arena:
 
     # ── Private: Seed ──────────────────────────────────────────────────────
 
-    def _seed_generation(self, challenge: Challenge) -> Generation:
+    def _seed_generation(self, challenge: Challenge, tournament_id: str = "") -> Generation:
         """Generate initial submissions from all registered LLM providers with Agentic Reflection."""
-        submissions = []
+        submissions: list[Submission] = []
         for pname, pfn in self.providers.items():
             try:
                 if self.config.verbose:
                     print(f"  🤖 Seeding from {pname}...")
-                    
+
                 max_reflections = 2
                 feedback = ""
                 source = ""
-                
+
                 for attempt in range(max_reflections + 1):
                     prompt_desc = challenge.description
                     if feedback:
                         prompt_desc += f"\n\n[COMPILER ERROR from previous attempt]:\n{feedback}\nPlease fix the code."
-                        
+
                     source = pfn(prompt_desc, challenge.function_signature)
-                    
-                    # Quick compilation check
+
                     result = _c.compile_and_run(source, 5.0)
                     if result.success:
                         if self.config.verbose and attempt > 0:
@@ -293,7 +358,6 @@ class Arena:
                         if self.config.verbose and attempt < max_reflections:
                             print(f"    ↳ ❌ Failed gate {result.gate_reached.value}. Reflecting...")
 
-                fp = code_fingerprint(source)
                 sub = Submission(
                     challenge_id=challenge.id,
                     generation=0,
@@ -302,12 +366,11 @@ class Arena:
                     status=SubmissionStatus.PENDING,
                 )
                 submissions.append(sub)
-                self._seen_fingerprints.add(fp)
             except Exception as e:
                 if self.config.verbose:
                     print(f"  ⚠️  {pname} error: {e}")
 
-        return self._evaluate_generation(submissions, challenge, 0, [])
+        return self._evaluate_generation(submissions, challenge, 0, [], tournament_id)
 
     # ── Private: Evaluate ──────────────────────────────────────────────────
 
@@ -317,30 +380,25 @@ class Arena:
         challenge: Challenge,
         gen_num: int,
         all_sources_prev: list[str],
+        tournament_id: str = "",
     ) -> Generation:
         """Compile, benchmark, and score every submission."""
-
         all_sources = list(all_sources_prev)
+        weights_map = self.config.weights_dict()
 
-        # De-duplicate by fingerprint
-        unique: list[Submission] = []
         for sub in submissions:
             fp = code_fingerprint(sub.source_code)
-            if fp not in self._seen_fingerprints:
-                self._seen_fingerprints.add(fp)
-                unique.append(sub)
-            else:
-                sub.status = SubmissionStatus.ELIMINATED
-        # Keep duplicates but mark them — still process them
-        to_evaluate = submissions  # process all, duplicates get low novelty
-
-        for sub in to_evaluate:
-            if sub.status == SubmissionStatus.ELIMINATED:
-                continue
+            is_duplicate = fp in self._seen_fingerprints
+            self._seen_fingerprints.add(fp)
 
             # Gate 0: capability safety check
             safe, violations = _c.validate_safety(sub.source_code)
             if not safe:
+                sub.compilation = CompilationResult(
+                    success=False,
+                    gate_reached=CompilationGate.CAPABILITY,
+                    error="; ".join(violations),
+                )
                 sub.status = SubmissionStatus.FAILED
                 continue
 
@@ -360,58 +418,46 @@ class Arena:
             # Native code quality score (Vitalis hotpath)
             quality = native_code_quality(sub.source_code)
 
-            # Novelty vs current population
-            novelty = code_novelty(sub.source_code, all_sources)
+            # Novelty vs current population (elites keep small floor; non-elite duplicates penalized)
+            raw_novelty = code_novelty(sub.source_code, all_sources)
+            if is_duplicate and "elite" not in sub.mutations:
+                novelty = min(raw_novelty, 0.05)
+            else:
+                novelty = raw_novelty
             all_sources.append(sub.source_code)
 
-            # Adaptive fitness (weights shift per generation — native Rust)
-            # speed proxy: 1/(compile_time_ms) normalized
-            speed_proxy = 1.0 / max(result.compile_time_ms, 1.0)
-            speed_norm = min(speed_proxy / 10.0, 1.0)  # normalize to [0,1]
+            speed_proxy = 1.0 / max(result.compile_time_ms, 0.1)
+            speed_norm = min(speed_proxy / 10.0, 1.0)
 
             adaptive = adaptive_fitness_score(
                 speed=speed_norm,
                 correctness=correctness,
                 complexity=quality,
-                security=0.8,             # default safe (no violations)
+                security=0.9,
                 generation=gen_num,
             )
 
             sub.fitness = FitnessScore(
                 correctness=correctness,
-                performance=speed_norm,     # refined below with relative scoring
+                performance=speed_norm,
                 code_quality=quality,
-                robustness=correctness,     # simplified: fuzz = correctness proxy
+                robustness=max(correctness, adaptive),
                 efficiency=speed_norm,
                 novelty=novelty,
+                WEIGHTS=weights_map,
             )
             sub.status = SubmissionStatus.SCORED
 
-        # Relative performance scoring
-        scored = [s for s in to_evaluate if s.fitness is not None]
+        # Relative performance scoring & benchmark attachment for top candidates
+        scored = [s for s in submissions if s.fitness is not None]
         if scored:
-            comp_times = [s.compilation.compile_time_ms
-                          for s in scored if s.compilation]
+            comp_times = [
+                s.compilation.compile_time_ms
+                for s in scored if s.compilation is not None
+            ]
             for s in scored:
-                if s.compilation:
+                if s.compilation is not None:
                     perf = compute_fitness_performance(s.compilation.compile_time_ms, comp_times)
-                    # Recompute weighted composite via native Rust
-                    metrics = [
-                        s.fitness.correctness,
-                        perf,
-                        s.fitness.code_quality,
-                        s.fitness.robustness,
-                        s.fitness.efficiency,
-                        s.fitness.novelty,
-                    ]
-                    weights = [
-                        self.config.weight_correctness,
-                        self.config.weight_performance,
-                        self.config.weight_quality,
-                        self.config.weight_robustness,
-                        self.config.weight_efficiency,
-                        self.config.weight_novelty,
-                    ]
                     s.fitness = FitnessScore(
                         correctness=s.fitness.correctness,
                         performance=perf,
@@ -419,64 +465,114 @@ class Arena:
                         robustness=s.fitness.robustness,
                         efficiency=s.fitness.efficiency,
                         novelty=s.fitness.novelty,
+                        WEIGHTS=weights_map,
                     )
 
         # Pareto front computation (multi-objective)
         objective_vecs = [
             (s.id, [s.fitness.correctness, s.fitness.performance,
                     s.fitness.code_quality, s.fitness.novelty])
-            for s in scored
+            for s in scored if s.fitness is not None
         ]
         pareto_ids = set(compute_pareto_front(objective_vecs)) if objective_vecs else set()
 
         # Identify champion (highest composite fitness)
         ranked = sorted(scored, key=lambda s: s.fitness.total, reverse=True)
         champion = ranked[0] if ranked else None
+        if champion is not None and champion.id in pareto_ids:
+            champion.status = SubmissionStatus.PROMOTED
+            if champion.compilation is not None and champion.benchmark is None:
+                champion.benchmark = compute_benchmark([champion.compilation.compile_time_ms] * max(2, min(5, self.config.benchmark_runs)))
+
+        if tournament_id and champion is not None and champion.fitness is not None:
+            get_provenance().record(
+                "compilation",
+                tournament_id,
+                champion.provider.value,
+                {
+                    "generation": gen_num,
+                    "champion_id": champion.id,
+                    "fitness": round(champion.fitness.total, 2),
+                    "pareto_front_size": len(pareto_ids),
+                },
+            )
 
         return Generation(
             number=gen_num,
             challenge_id=challenge.id,
-            submissions=to_evaluate,
+            submissions=submissions,
             champion_id=champion.id if champion else None,
-            champion_fitness=champion.fitness.total if champion else 0.0,
+            champion_fitness=champion.fitness.total if (champion and champion.fitness) else 0.0,
         )
 
     # ── Private: Correctness ───────────────────────────────────────────────
 
+    @staticmethod
+    def _strip_existing_main(source: str) -> str:
+        """Remove any existing `fn main() ... { ... }` block so test wrapper doesn't collide."""
+        m = re.search(r"\bfn\s+main\s*\([^)]*\)\s*(?:->\s*[^{]+)?\s*\{", source)
+        if not m:
+            return source
+        start = m.start()
+        depth = 1
+        i = m.end()
+        while i < len(source) and depth > 0:
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+            i += 1
+        return (source[:start] + source[i:]).strip()
+
+    @staticmethod
+    def _infer_return_type(signature: str) -> str:
+        m = re.search(r"->\s*([^{]+)", signature or "")
+        return m.group(1).strip() if m else "i64"
+
+    @staticmethod
+    def _infer_fn_name(signature: str) -> str:
+        m = re.search(r"\bfn\s+([a-zA-Z_]\w*)", signature or "")
+        return m.group(1) if m else "solve"
+
     def _check_correctness(self, source: str, challenge: Challenge) -> float:
         """Run test cases against compiled output. Returns pass rate [0.0, 1.0]."""
         if not challenge.test_cases:
-            return 1.0   # no test cases = correctness assumed if compiled
+            return 1.0
+
+        clean_source = self._strip_existing_main(source)
+        ret_type = self._infer_return_type(challenge.function_signature)
+        fn_name = self._infer_fn_name(challenge.function_signature)
 
         passed = 0
+        valid_cases = 0
         for tc in challenge.test_cases:
             call = tc.get("call", "")
-            expected = str(tc.get("expected", ""))
+            if not call and "input" in tc:
+                inp = tc["input"]
+                call = f"{fn_name}({inp})"
+            expected = str(tc.get("expected", "")).strip()
             if not call:
                 continue
+            valid_cases += 1
 
-            wrapper = f'{source}\n\nfn main() -> i64 {{\n    {call}\n}}'
+            wrapper = f"{clean_source}\n\nfn main() -> {ret_type} {{\n    {call}\n}}"
             result = _c.compile_and_run(wrapper, timeout_seconds=5.0)
 
-            if result.success and expected in result.output:
-                passed += 1
+            if result.success:
+                actual = result.output.strip()
+                norm_actual = actual.replace(" ", "")
+                norm_expected = expected.replace(" ", "")
+                if norm_actual == norm_expected or actual.splitlines()[-1:].count(expected) > 0:
+                    passed += 1
 
-        return passed / len(challenge.test_cases)
+        return passed / valid_cases if valid_cases > 0 else 1.0
 
     # ── Private: Vitalis Native Evo Dual-Track ─────────────────────────────
 
     def _vitalis_evo_register(self, challenge: Challenge, gen: Generation) -> None:
-        """
-        Register the generation champion with Vitalis's native evolution engine.
-        This provides dual-track evolution history: Forge engine + native engine.
-        """
         if not self.config.use_vitalis_native_evo:
             return
-        champion = None
-        for s in gen.submissions:
-            if s.id == gen.champion_id:
-                champion = s
-                break
+        champion = next((s for s in gen.submissions if s.id == gen.champion_id), None)
         if champion is None or champion.fitness is None:
             return
 
@@ -488,12 +584,17 @@ class Arena:
                 _c.evo_submit_variant(fn_name, champion.source_code)
             _c.evo_set_fitness(fn_name, champion.fitness.total / 100.0)
         except Exception:
-            pass   # non-critical — Forge engine is the primary
+            pass
 
     # ── Logging ────────────────────────────────────────────────────────────
 
-    def _log_gen(self, gen: Generation, prev_sources: list[str],
-                  diversity: float = 0.0, ema: float = 0.0) -> None:
+    def _log_gen(
+        self,
+        gen: Generation,
+        prev_sources: list[str],
+        diversity: float = 0.0,
+        ema: float = 0.0,
+    ) -> None:
         if not self.config.verbose:
             return
         scored = [s for s in gen.submissions if s.fitness]
@@ -508,10 +609,10 @@ class Arena:
                 notes += f"[{', '.join(champion.mutations[:2])}]"
 
         diversity_str = f"{diversity:.2f}" if diversity > 0 else "  —  "
-        ema_str = f"{ema:.1f}" if ema > 0 else "  —  "
-
-        print(f"  {gen.number:>4}  {len(scored):>7}  {len(failed):>7}  "
-              f"{gen.champion_fitness:>10.2f}  {diversity_str:>10}  {notes}")
+        print(
+            f"  {gen.number:>4}  {len(scored):>7}  {len(failed):>7}  "
+            f"{gen.champion_fitness:>10.2f}  {diversity_str:>10}  {notes}"
+        )
 
     def _log_final(self, tournament: Tournament) -> None:
         print(f"\n{'═' * 65}")
@@ -519,31 +620,28 @@ class Arena:
         print(f"  📊  Total generations : {len(tournament.generations)}")
 
         champion = tournament.champion
-        if champion:
+        if champion and champion.fitness:
             print(f"  🎯  Champion fitness  : {champion.fitness.total:.2f}")
             print(f"  👤  Origin           : {champion.provider.value}")
             if champion.parent_a_id:
                 print(f"  🧬  Ancestry         : evolved (gen {champion.generation})")
             if champion.mutations:
                 print(f"  🔬  Last mutations   : {', '.join(champion.mutations[:3])}")
-            if champion.fitness:
-                print(f"\n  Fitness breakdown:")
-                print(f"    Correctness : {champion.fitness.correctness:.2f}")
-                print(f"    Performance : {champion.fitness.performance:.2f}")
-                print(f"    Qual/Style  : {champion.fitness.code_quality:.2f}")
-                print(f"    Novelty     : {champion.fitness.novelty:.2f}")
+            print(f"\n  Fitness breakdown:")
+            print(f"    Correctness : {champion.fitness.correctness:.2f}")
+            print(f"    Performance : {champion.fitness.performance:.2f}")
+            print(f"    Qual/Style  : {champion.fitness.code_quality:.2f}")
+            print(f"    Novelty     : {champion.fitness.novelty:.2f}")
 
-            # Vitalis pipeline insight
             if champion.compilation:
                 print(f"\n  Compiler stats:")
                 print(f"    Compile time : {champion.compilation.compile_time_ms:.1f}ms")
                 print(f"    Gate reached : {champion.compilation.gate_reached.value}")
 
-            # AST + IR dump for champion (FFI only)
             try:
-                ast = _c.parse_ast(champion.source_code)
-                if ast and ast != "(AST requires FFI)":
-                    print(f"\n  AST (champion): {ast[:120]}...")
+                ast_str = _c.parse_ast(champion.source_code)
+                if ast_str and not ast_str.startswith("(AST"):
+                    print(f"\n  AST (champion): {ast_str[:120]}...")
             except Exception:
                 pass
 
@@ -551,7 +649,6 @@ class Arena:
             for line in champion.source_code.split("\n"):
                 print(f"    {line}")
 
-        # Provider stats
         gen0 = tournament.generations[0] if tournament.generations else None
         if gen0:
             print(f"\n  Seed provider results (Gen 0):")

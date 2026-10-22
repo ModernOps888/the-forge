@@ -36,25 +36,33 @@ Usage (add to Cursor / VS Code MCP config):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
+_ORIG_STDOUT = sys.stdout
+
 from forge.compiler import compile_and_run, vitalis_version
-from forge.providers import call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM, get_vendor_status, _is_local_model
+from forge.providers import (
+    call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM,
+    get_vendor_status, _is_local_model, _pick_available_model,
+)
 from forge.budget import get_tracker, BudgetConfig
 from forge.governance import get_provenance, get_policy_engine
 from forge.factory import build as factory_build, ARTIFACT_TYPES
 from forge.marketplace import get_marketplace
 from forge.skills import certify_from_compilation
 from forge.fitness_engine import score as fitness_score
+from forge.benchmark import compute_benchmark
 
-TRACKER = get_tracker(BudgetConfig(max_budget_usd=50.0))
+TRACKER = get_tracker(BudgetConfig(max_budget_usd=float(os.environ.get("FORGE_BUDGET_USD", "50.0"))))
 PROVENANCE = get_provenance()
 
 
@@ -220,6 +228,35 @@ TOOLS = [
         "description": "Get status of all configured LLM vendors (Anthropic, OpenAI, Google, DeepSeek, xAI, OpenRouter, Ollama). Shows which have active API keys and their endpoints.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "forge_market_publish",
+        "description": "Publish a code artifact or skill to The Forge Skill Marketplace with SHA-256 integrity hashing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the artifact or skill"},
+                "description": {"type": "string", "description": "Description of what it does"},
+                "source_code": {"type": "string", "description": "Complete source code"},
+                "artifact_type": {"type": "string", "default": "agent"},
+                "language": {"type": "string", "default": "python"},
+                "fitness": {"type": "number", "default": 85.0},
+                "provider": {"type": "string", "default": "mcp"},
+            },
+            "required": ["name", "source_code"],
+        },
+    },
+    {
+        "name": "forge_benchmark",
+        "description": "Benchmark Vitalis .sl source code across N iterations using Welford's online algorithm and Student's t 95% confidence intervals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Vitalis (.sl) source code to benchmark"},
+                "runs": {"type": "integer", "description": "Number of benchmark iterations (3-50)", "default": 5},
+            },
+            "required": ["code"],
+        },
+    },
 ]
 
 
@@ -346,13 +383,14 @@ def handle_forge_consensus(params: dict) -> dict:
         synth_prompt += f"=== {name.upper()} ===\n{ans[:1500]}\n\n"
     synth_prompt += "Synthesize into one authoritative answer. Note agreements/divergences."
 
-    synth_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")
+    synth_alias = _pick_available_model("gemini-lite", tier="simple")
+    synth_model = MODELS.get(synth_alias, "google/gemini-3.8-flash")
     synth_msgs = [
         {"role": "system", "content": "You are a synthesis agent."},
         {"role": "user", "content": synth_prompt},
     ]
     merged, _ = call_model(synth_model, synth_msgs, max_tokens=2048, temperature=0.3,
-                                 provider_name="gemini-lite", purpose="mcp_synthesis")
+                                 provider_name=synth_alias, purpose="mcp_synthesis")
 
     return {
         "individual": individual,
@@ -447,8 +485,10 @@ def handle_forge_orchestrate(params: dict) -> dict:
         return {"error": "task is required"}
         
     models = params.get("models", ["qwen-local"])
+    language = params.get("language", "auto")
     
     try:
+        planner = _pick_available_model("claude", tier="hard")
         prompt = (
             "You are the Master Orchestrator for The Forge. "
             "Output ONLY valid JSON representing a `Challenge` object.\n\n"
@@ -460,13 +500,14 @@ def handle_forge_orchestrate(params: dict) -> dict:
             '  "difficulty": 5,\n'
             '  "test_cases": [{"call": "solve(...)", "expected": "result"}]\n'
             "}\n\n"
-            f"USER TASK: {task}"
+            f"USER TASK: {task}\n"
+            f"LANGUAGE PREFERENCE: {language}"
         )
         content, _ = call_model(
-            MODELS["claude"],
+            MODELS.get(planner, MODELS["claude"]),
             [{"role": "user", "content": prompt}],
             max_tokens=1500,
-            provider_name="claude",
+            provider_name=planner,
             purpose="orchestrate"
         )
         content = content.replace("```json", "").replace("```", "").strip()
@@ -509,6 +550,68 @@ def handle_vitalis_score(params: dict) -> dict:
         return {"error": str(e)}
 
 
+def handle_forge_market_publish(params: dict) -> dict:
+    name = params.get("name", "")
+    source_code = params.get("source_code", "")
+    if not name or not source_code:
+        return {"error": "name and source_code are required"}
+    mp = get_marketplace()
+    entry = mp.publish_artifact(
+        name=name,
+        description=params.get("description", name),
+        artifact_type=params.get("artifact_type", "agent"),
+        language=params.get("language", "python"),
+        source_code=source_code,
+        fitness=float(params.get("fitness", 85.0)),
+        provider=params.get("provider", "mcp"),
+    )
+    return {
+        "success": True,
+        "id": entry.id,
+        "name": entry.name,
+        "kind": entry.kind,
+        "category": entry.category,
+        "fitness": entry.fitness,
+        "path": entry.path,
+    }
+
+
+def handle_forge_benchmark(params: dict) -> dict:
+    code = params.get("code", "")
+    runs = max(1, min(50, int(params.get("runs", 5))))
+    if not code:
+        return {"error": "code is required"}
+    policy = get_policy_engine()
+    violations = policy.check_all({"source_code": code})
+    if any(v["action"] == "block" for v in violations):
+        return {"success": False, "error": f"Policy: {violations[0]['description']}"}
+
+    timings = []
+    last_result = None
+    for _ in range(runs):
+        res = compile_and_run(code)
+        last_result = res
+        if not res.success:
+            return {
+                "success": False,
+                "gate_reached": res.gate_reached.value if res.gate_reached else "unknown",
+                "error": res.error,
+            }
+        timings.append(res.compile_time_ms)
+
+    bench = compute_benchmark(timings)
+    return {
+        "success": True,
+        "runs": runs,
+        "output": last_result.output if last_result else "",
+        "mean_ms": bench.mean_ms,
+        "std_ms": bench.stddev_ms,
+        "min_ms": bench.min_ms,
+        "max_ms": bench.max_ms,
+        "ci_95_ms": list(bench.confidence_interval_95),
+    }
+
+
 # ── MCP Dispatch ──────────────────────────────────────────────────────────────
 
 HANDLERS = {
@@ -519,6 +622,8 @@ HANDLERS = {
     "forge_chat": handle_forge_chat,
     "forge_budget": handle_forge_budget,
     "forge_market_search": handle_forge_market_search,
+    "forge_market_publish": handle_forge_market_publish,
+    "forge_benchmark": handle_forge_benchmark,
     "forge_provenance": handle_forge_provenance,
     "forge_orchestrate": handle_forge_orchestrate,
     "forge_provider_status": lambda _: get_vendor_status(),
@@ -529,8 +634,8 @@ HANDLERS = {
 # ── JSON-RPC 2.0 over stdio ───────────────────────────────────────────────────
 
 def send(obj: dict):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    _ORIG_STDOUT.write(json.dumps(obj) + "\n")
+    _ORIG_STDOUT.flush()
 
 
 def handle_request(req: dict) -> dict | None:
@@ -544,7 +649,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": "2025-11-25",
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "the-forge", "version": "2.3.0"},
+                "serverInfo": {"name": "the-forge", "version": "2.4.0"},
             },
         }
 
@@ -564,7 +669,8 @@ def handle_request(req: dict) -> dict | None:
                 "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
             }
         try:
-            result = handler(tool_args)
+            with contextlib.redirect_stdout(sys.stderr):
+                result = handler(tool_args)
             return {
                 "jsonrpc": "2.0", "id": req_id,
                 "result": {

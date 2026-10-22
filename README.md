@@ -4,6 +4,7 @@
 
 ### Multi-Agent Code Evolution Platform
 
+[![Version](https://img.shields.io/badge/Release-v2.4.0-f97316?style=for-the-badge)](https://github.com/ModernOps888/the-forge/releases/tag/v2.4.0)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Vitalis](https://img.shields.io/badge/Powered_by-Vitalis_JIT-b7410e?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/ModernOps888/vitalis)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
@@ -57,7 +58,7 @@ The result: code that's measurably better than any single model wrote.
 │  LLM patching · AST validation · Fitness gating · Backup    │
 ├─────────────────────────────────────────────────────────────┤
 │                  4. AGENT FACTORY                            │
-│  16 artifact types · 8 languages · Auto-deploy               │
+│  17 artifact types · 8 languages · Auto-deploy + Marketplace │
 ├─────────────────────────────────────────────────────────────┤
 │                  3. EVOLUTION LAYER                          │
 │  Boltzmann · Quantum annealing · Bayesian UCB · Lévy flight  │
@@ -180,6 +181,7 @@ print(result.leaderboard())
 | `extension` | TypeScript | VS Code extension with package.json, tsconfig |
 | `docker` | Dockerfile | Dockerfile + docker-compose.yml |
 | `skill` | Vitalis .sl | Native JIT-compiled hot-path function |
+| `full_project` | Python | Multi-file production project scaffold with tests & Docker |
 
 ### Scoring Pipeline
 
@@ -212,6 +214,7 @@ Every artifact type gets full deployment wiring:
 | `go_service` | `main.go`, `go.mod`, `Makefile`, `Dockerfile` |
 | `react_app` | `Component.tsx`, `package.json` |
 | `terraform` | `main.tf`, `backend.tf`, `terraform.tfvars.example` |
+| `full_project` | Multi-file tree parsed from `# === FILE: path ===` markers + `README.md` |
 
 ---
 
@@ -590,32 +593,35 @@ The Forge doesn't use vibes. Every comparison uses proper statistics:
 ```
 the-forge/
 ├── forge/
-│   ├── __init__.py           # Package exports (v2.3.0)
-│   ├── models.py             # Data models (Challenge, Submission, Score, etc.)
-│   ├── compiler.py           # Vitalis JIT integration (7-gate pipeline)
-│   ├── benchmark.py          # Welford stats, t-tests, outlier detection
-│   ├── evolution.py          # Crossover, mutation, Boltzmann/UCB selection
-│   ├── arena.py              # Tournament orchestrator
-│   ├── factory.py            # Agent Factory (16 types, 8 languages)
-│   ├── deployer.py           # Auto-deployment wiring for all artifact types
-│   ├── fitness_engine.py     # 6-dimensional polyglot code scoring
-│   ├── providers.py          # OpenRouter + Ollama LLM providers
-│   ├── budget.py             # Cost tracking, EMA spike detection
-│   ├── governance.py         # Provenance chain, policy engine, circuit breaker
-│   ├── memory.py             # Three-tier memory (working/episodic/semantic)
-│   ├── marketplace.py        # Skill marketplace registry
-│   ├── skills.py             # Skill DNA certification from compilation
-│   ├── tracer.py             # Execution traces
-│   ├── replay.py             # Deterministic tournament replay
+│   ├── __init__.py           # Package exports (v2.4.0)
+│   ├── models.py             # Data models (Challenge, Submission, FitnessScore, etc.)
+│   ├── compiler.py           # Vitalis JIT + CLI + sandboxed pure-Python .sl interpreter (7 gates)
+│   ├── benchmark.py          # Welford stats, Student's t 95% CI, Welch's t-test, MAD outliers
+│   ├── evolution.py          # Crossover, mutation, Boltzmann/UCB selection, quantum annealing
+│   ├── arena.py              # Multi-LLM tournament orchestrator with provenance & test runner
+│   ├── factory.py            # Agent Factory (17 artifact types, 8 languages, auto-deploy)
+│   ├── deployer.py           # Policy-governed auto-deployment wiring for all 17 artifact types
+│   ├── fitness_engine.py     # 6-dimensional polyglot code scoring (Python/TS/Rust/Go/HCL/YAML/Docker/.sl)
+│   ├── providers.py          # Smart-routed Direct Vendor + OpenRouter + Ollama LLM providers
+│   ├── budget.py             # Thread-safe cost tracking, pre-update EMA spike detection
+│   ├── governance.py         # SHA-256 provenance chain, 10-rule AST policy engine, circuit breaker
+│   ├── memory.py             # Thread-safe 3-tier memory (working/episodic/semantic)
+│   ├── marketplace.py        # Portable skill & artifact marketplace registry
+│   ├── skills.py             # Cryptographic Skill DNA certification from compilation
+│   ├── tracer.py             # Bounded execution traces + HITL approval gates
+│   ├── replay.py             # Deterministic tournament replay & A/B testing (`run_ab_test`)
 │   └── vitalis_ffi.py        # Vitalis Rust FFI bindings (234K LOC of bindings)
+├── tests/
+│   ├── test_forge_comprehensive.py # Full 11-part end-to-end verification suite
+│   └── test_forge.py         # Test runner entry point
 ├── dashboard/
-│   └── index.html            # Full interactive dashboard (single-file, no deps)
+│   └── index.html            # Full interactive dashboard (single-file, zero external JS deps)
 ├── challenges/
 │   └── sort_integers.json    # Example challenge definition
-├── forge_server.py           # HTTP API server (1800+ lines, stdlib only)
-├── forge_cli.py              # Full CLI entry point
-├── forge_desktop.py          # Native Windows desktop integration
-├── forge_mcp.py              # MCP server interface
+├── forge_server.py           # ThreadingHTTPServer API server (2,100+ lines)
+├── forge_cli.py              # Full CLI entry point (9 subcommands)
+├── forge_desktop.py          # Native Windows desktop tray & Explorer context menu bridge
+├── forge_mcp.py              # MCP server interface (13 tools over JSON-RPC 2.0 stdio)
 ├── launch.ps1                # Windows PowerShell launcher
 ├── requirements.txt          # Minimal dependencies
 └── README.md
@@ -643,15 +649,41 @@ the-forge/
 | `POST` | `/api/analyze-file` | AI code review of local file |
 | `POST` | `/api/export` | Export to IDE bridge (multi-target) |
 | `POST` | `/api/native` | Native OS bridge (explorer/IDE/terminal) |
-| `GET` | `/api/health` | System health + active vendors |
+| `POST` | `/api/transcribe` | Local Whisper voice-to-text transcription |
+| `POST` | `/api/hitl/resolve` | Approve or reject a pending Human-in-the-Loop request |
+| `GET` | `/api/health` | System health + active vendors (public) |
+| `GET` | `/api/auth-bootstrap` | Loopback-only API key bootstrap for local dashboard |
 | `GET` | `/api/models` | Available models + pricing + vendor badges |
 | `GET` | `/api/budget` | Cost & token report |
 | `GET` | `/api/provenance` | Governance audit trail |
 | `GET` | `/api/memory` | Memory system stats |
-| `GET` | `/api/traces` | Execution traces |
+| `GET` | `/api/traces` | Execution traces with step durations |
+| `GET` | `/api/hitl/pending` | Pending Human-in-the-Loop approval gates |
+| `GET` | `/api/system` | Real-time CPU, RAM, and GPU telemetry |
+| `GET` | `/api/artifact-types` | Supported Agent Factory artifact types & languages |
+| `GET` | `/api/marketplace` | Published skills & artifacts in the marketplace |
+| `GET` | `/api/ag-inbox` | Antigravity IDE inbox items |
 | `GET` | `/api/vendor-health` | Vendor connection status |
 | `GET` | `/api/compute` | Hardware detection (GPUs, CPU, RAM) |
 | `GET` | `/api/ide-targets` | Configured IDE export targets |
+
+### MCP Tools (`forge_mcp.py` — 13 Tools over JSON-RPC 2.0 `stdio`)
+
+| Tool | Description |
+|------|-------------|
+| `vitalis_score` | 6-dimensional polyglot code fitness evaluation (`0-100` + grade `A+` to `F`) |
+| `forge_compile` | Compile & execute `.sl` code through the 7-gate Vitalis pipeline |
+| `forge_benchmark` | Benchmark `.sl` code across $N$ runs with Welford stats & 95% Student's $t$ CI |
+| `forge_build` | Multi-LLM Agent Factory competition across 17 artifact types |
+| `forge_orchestrate` | Architect + multi-model competitive challenge generation & evolution |
+| `forge_research` | Multi-agent parallel research query |
+| `forge_consensus` | Multi-agent query + authoritative synthesis |
+| `forge_chat` | Cost-tracked chat with any configured cloud or local model |
+| `forge_budget` | Live spend, token counters, per-provider breakdown, and optimization hints |
+| `forge_market_search` | Search certified skills and artifacts in the Forge Marketplace |
+| `forge_market_publish` | Publish a code artifact or skill with SHA-256 integrity hashing |
+| `forge_provenance` | Inspect and verify the SHA-256 governance provenance chain |
+| `forge_provider_status` | Inspect active LLM vendors and hardware compute capabilities |
 
 ---
 
@@ -666,18 +698,17 @@ the-forge/
 - [x] **IDE-agnostic export bridge** (VS Code, Cursor, Windsurf, Antigravity, clipboard)
 - [x] Budget & cost tracking with EMA spike detection
 - [x] Enterprise governance (provenance chain, policy engine, circuit breaker)
-- [x] Agent Factory (16 artifact types, 8 languages)
+- [x] Agent Factory (17 artifact types, 8 languages)
 - [x] Auto-deployment wiring for all artifact types
 - [x] Three-tier memory engine (working/episodic/semantic)
 - [x] Self-improvement engine with fitness gating
 - [x] Interactive dashboard with 10+ tabs
 - [x] Native desktop bridge (File Explorer, VS Code, PowerShell)
-- [x] Polyglot fitness engine (Python, Rust, Go, TypeScript, etc.)
+- [x] Polyglot fitness engine (Python, Rust, Go, TypeScript, HCL, YAML, Dockerfile, Vitalis `.sl`)
 - [x] Local model support via Ollama (GPU/CPU/split compute modes)
-- [x] MCP server (11 tools, smart-routed)
+- [x] MCP server (13 tools, smart-routed, stdout-isolated JSON-RPC 2.0)
+- [x] Deterministic tournament replay & A/B testing (`create_replay_config`, `run_replay`, `run_ab_test`)
 - [ ] SQLite evolution ledger
-- [ ] AST-level crossover (not line-level)
-- [ ] Property-based fuzz testing via Vitalis
 - [ ] Multi-user collaboration mode
 - [ ] WebSocket real-time dashboard updates
 
@@ -687,12 +718,12 @@ the-forge/
 
 MIT License — see [LICENSE](LICENSE) for details.
 
-## 🔧 Recent Changes (v2.3 — October 2026 Frontier Model Horizon & Hardening)
+## 🔧 Recent Changes (v2.4.0 — Surgical Overhaul, Sandboxed `.sl` Engine & Full Verification)
 
-- **October 2026 model horizon** — Updated model registry and pricing to **Claude Fable 5.1**, **Claude Opus 5.5**, **Claude Sonnet 5.5**, **Claude Haiku 5.5**, **GPT-6 Astra**, **GPT-6.1 Sol**, **GPT-5**, **o3 / o3-mini**, **Gemini 4 Argon**, **Gemini 3.8 Pro/Flash**, **Grok 4.7** (with direct `XAI_API_KEY` vendor routing), and **DeepSeek R1**.
-- **Smart routing & reasoning models** — `openrouter_provider()`, `factory.build()`, and `_api_orchestrate()` now route through `call_model()` so direct vendor keys and local Ollama models work everywhere. OpenAI reasoning models (`o1`/`o3`/`o4`) automatically use `max_completion_tokens` without `temperature`.
-- **Security & path jailing** — Confined `/api/analyze-file` and `/api/native` to the project root, gated `/api/native` terminal execution behind `FORGE_ALLOW_SHELL_EXEC`, tightened localhost CORS origin matching, and removed unused `bs4` import in URL context injection.
-- **Engine & FFI fixes** — Fixed `DimensionScore` subtraction in the self-improvement regression gate, fixed single-loop false positives in `fitness_engine.py`, wired `hotpath_weighted_score` in `factory.py`, and made all workspace paths dynamic relative to the repository root.
+- **Sandboxed Pure-Python `.sl` Compiler & Interpreter (`forge/compiler.py`)** — Added a complete 7-gate pure-Python lexer, parser, type-checker, and step-bounded AST evaluator supporting arrays (`.len()`, `.get()`, `.set()`, `.push()`, `.slice()`, `merge_sorted`, `insertion_sort`), loops, recursion, and arithmetic when the native `vitalis.dll` binary is absent. Enforced `validate_safety()` prior to execution across all compilation modes and replaced all fallback constants in `hotpath_*` with exact mathematical implementations.
+- **Evolution, Arena & Statistical Benchmark Overhaul (`forge/evolution.py`, `forge/arena.py`, `forge/benchmark.py`, `forge/replay.py`)** — Fixed `_seen_fingerprints` pre-registration in `Arena` so Gen 0 seeds and Elites are never falsely eliminated; added `_split_function()` header/body/footer isolation so crossover and mutation operators never corrupt function signatures or closing braces; replaced `hash()` with deterministic `zlib.crc32` in `_ngram_vector`; added zero-variance handling in `welch_t_test()` and `MAD == 0` fallback in `detect_outliers()`; and implemented `create_replay_config()`, `run_replay()`, and `run_ab_test()`.
+- **Polyglot Fitness, Agent Factory & Deployer (`forge/fitness_engine.py`, `forge/factory.py`, `forge/deployer.py`)** — Fixed the `??\s` regex crash on TypeScript nullish coalescing; added dedicated scorers for Vitalis `.sl`, HCL/Terraform, YAML, and Dockerfile; expanded Agent Factory & Deployer to all 17 artifact types (including `full_project`); wired automatic deployment and Marketplace publishing into `factory.build()`; and enforced `PolicyEngine.check_all()` across all deployed artifacts.
+- **Governance, Memory, MCP & Server Hardening (`forge/governance.py`, `forge/memory.py`, `forge_server.py`, `forge_mcp.py`, `dashboard/index.html`)** — Upgraded `PolicyEngine` with import-alias-aware AST call extraction (eliminating false positives on `dict.get()` / `list.remove()` while catching aliased `subprocess`/`os` calls); added parent-link tamper detection in `ProvenanceChain.verify_integrity()`; isolated MCP `stdio` JSON-RPC output with `contextlib.redirect_stdout(sys.stderr)` and added `forge_benchmark` + `forge_market_publish` tools (13 tools total); protected `.forge_key` from `/api/self-improve`; and fixed dashboard `patchFetchWithAuth` so `X-Forge-Key` is only sent to same-origin `/api/*` endpoints.
 
 ---
 

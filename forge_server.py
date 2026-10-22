@@ -59,6 +59,7 @@ from forge.providers import (
     call_openrouter, call_model, MODELS, CHAT_SYSTEM, RESEARCH_SYSTEM, COWORK_SYSTEM,
     _clean_code, CODE_SYSTEM, ollama_provider, openrouter_provider,
     _is_local_model, get_vendor_status, _resolve_vendor, detect_compute_hardware,
+    _pick_available_model, _detect_windows_ram_gb,
 )
 from forge.budget import get_tracker, BudgetConfig, RequestTrace, PRICING
 from forge.governance import get_provenance, get_policy_engine, CircuitBreaker
@@ -89,7 +90,7 @@ MEMORY = get_memory()  # Three-tier memory: working + episodic + semantic skills
 MAX_MODELS_PER_REQUEST = 8
 LOOPBACK_IPS = ("127.0.0.1", "::1", "localhost")
 FORGE_ALLOW_SHELL_EXEC = os.environ.get("FORGE_ALLOW_SHELL_EXEC", "false").strip().lower() in ("1", "true", "yes")
-_SENSITIVE_PATH_PATTERNS = (".env", ".pem", ".key", "id_rsa", "id_ed25519", ".ssh", ".aws/credentials", ".git/config", ".npmrc", ".pypirc")
+_SENSITIVE_PATH_PATTERNS = (".env", ".forge_key", ".pem", ".key", "id_rsa", "id_ed25519", ".ssh", ".aws/credentials", ".git/config", ".npmrc", ".pypirc")
 
 
 def _load_or_create_api_key() -> str:
@@ -230,10 +231,13 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                 for name, model_id in MODELS.items():
                     pricing = PRICING.get(model_id, {"input": 0, "output": 0})
                     # Determine vendor routing for this model
-                    try:
-                        vendor, _ = _resolve_vendor(model_id)
-                    except RuntimeError:
-                        vendor = "none"
+                    if _is_local_model(name):
+                        vendor = "ollama"
+                    else:
+                        try:
+                            vendor, _ = _resolve_vendor(model_id)
+                        except RuntimeError:
+                            vendor = "none"
                     models_out.append({
                         "name": name,
                         "model_id": model_id,
@@ -305,7 +309,10 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                         "session_id": t.session_id,
                         "task": t.task,
                         "status": t.status,
-                        "steps": len(t.steps)
+                        "steps": len(t.steps),
+                        "step_details": [s.to_dict() for s in t.steps],
+                        "start_time": t.start_time,
+                        "end_time": t.end_time,
                     })
                 self._json_response({"traces": res})
 
@@ -316,6 +323,12 @@ class ForgeHandler(SimpleHTTPRequestHandler):
                 from forge.memory import get_memory
                 mem = get_memory()
                 self._json_response(mem.stats())
+
+            elif path == "/api/artifact-types":
+                self._json_response({"types": {k: {"description": v, "language": LANG_MAP.get(k, "python")} for k, v in ARTIFACT_TYPES.items()}})
+
+            elif path == "/api/marketplace":
+                self._json_response({"skills": get_marketplace().list_all()})
 
             else:
                 self._json_response({"error": "Unknown endpoint"}, 404)
@@ -431,6 +444,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         target_path = self._resolve_jailed_path(target_file)
         if target_path is None:
             return self._json_response({"error": "Target file must be inside the Forge project directory"}, 403)
+        if _is_sensitive_path(target_path):
+            return self._json_response({"error": "Refusing to patch sensitive file"}, 403)
         if not target_path.exists():
             return self._json_response({"error": f"Target file not found: {target_file}"}, 404)
 
@@ -439,11 +454,11 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         total_lines = len(code_lines)
         
         # Build a NUMBERED excerpt so the model can reference line numbers
-        # Show first 150 + last 40 lines with line numbers for large files
-        if total_lines > 250:
-            numbered_top = "\n".join(f"{i+1}: {line}" for i, line in enumerate(code_lines[:150]))
-            numbered_bot = "\n".join(f"{i+1}: {line}" for i, line in enumerate(code_lines[-40:], total_lines - 40))
-            excerpt = numbered_top + f"\n\n# ... [{total_lines - 190} lines omitted] ...\n\n" + numbered_bot
+        # Show up to 2,500 lines in full; for huge files, show first 2,000 + last 400 lines
+        if total_lines > 2500:
+            numbered_top = "\n".join(f"{i+1}: {line}" for i, line in enumerate(code_lines[:2000]))
+            numbered_bot = "\n".join(f"{i+1}: {line}" for i, line in enumerate(code_lines[-400:], total_lines - 400))
+            excerpt = numbered_top + f"\n\n# ... [{total_lines - 2400} lines omitted] ...\n\n" + numbered_bot
         else:
             excerpt = "\n".join(f"{i+1}: {line}" for i, line in enumerate(code_lines))
         
@@ -1038,30 +1053,45 @@ class ForgeHandler(SimpleHTTPRequestHandler):
 
     def _api_system(self):
         """Monitor full system telemetry: CPU, RAM, and NVIDIA GPU (for local SLMs)."""
-        import psutil
-        sys_data = {
-            "cpu_pct": int(psutil.cpu_percent()),
-            "ram_pct": int(psutil.virtual_memory().percent),
-            "ram_used_gb": round(psutil.virtual_memory().used / (1024**3), 1),
-            "ram_total_gb": round(psutil.virtual_memory().total / (1024**3), 1),
-            "gpu_available": False
-        }
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            sys_data = {
+                "cpu_pct": int(psutil.cpu_percent()),
+                "ram_pct": int(vm.percent),
+                "ram_used_gb": round(vm.used / (1024**3), 1),
+                "ram_total_gb": round(vm.total / (1024**3), 1),
+                "gpu_available": False,
+            }
+        except ImportError:
+            ram_total = _detect_windows_ram_gb() or 16.0
+            sys_data = {
+                "cpu_pct": 0,
+                "ram_pct": 50,
+                "ram_used_gb": round(ram_total * 0.5, 1),
+                "ram_total_gb": round(ram_total, 1),
+                "gpu_available": False,
+            }
         try:
             out = subprocess.check_output(
-                "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits",
-                shell=True, timeout=1, text=True
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                    "--format=csv,noheader,nounits",
+                ],
+                shell=False, timeout=2, text=True, stderr=subprocess.DEVNULL,
             ).strip().split('\n')[0]
             parts = [p.strip() for p in out.split(",")]
             if len(parts) >= 5:
                 vram_pct = int(round((float(parts[1]) / float(parts[2])) * 100)) if float(parts[2]) > 0 else 0
                 sys_data.update({
                     "gpu_available": True,
-                    "gpu_util_pct": int(parts[0]),
-                    "vram_used_mb": int(parts[1]),
-                    "vram_total_mb": int(parts[2]),
+                    "gpu_util_pct": int(float(parts[0])),
+                    "vram_used_mb": int(float(parts[1])),
+                    "vram_total_mb": int(float(parts[2])),
                     "vram_pct": vram_pct,
-                    "gpu_temp_c": int(parts[3]),
-                    "gpu_power_w": float(parts[4])
+                    "gpu_temp_c": int(float(parts[3])),
+                    "gpu_power_w": float(parts[4]) if parts[4] not in ("[N/A]", "N/A", "") else 0.0,
                 })
         except Exception:
             pass
@@ -1275,6 +1305,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/x-ndjson')
         self.send_header('Cache-Control', 'no-cache')
+        self._cors()
         self.end_headers()
 
         def stream_chunk(data: dict):
@@ -1286,8 +1317,12 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         
         max_iterations = 5
         final_content = ""
+        content = ""
         
         for iteration in range(max_iterations):
+            if TRACKER.is_exhausted:
+                stream_chunk({"type": "error", "msg": "Budget exhausted during cowork iteration."})
+                break
             try:
                 stream_chunk({"type": "step", "msg": f"Thinking (Iteration {iteration+1}/{max_iterations})..."})
                 
@@ -1537,7 +1572,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
             "Note agreements and divergences. Be precise."
         )
 
-        synth_model = MODELS.get("gemini-lite", "google/gemini-3.8-flash")
+        synth_alias = _pick_available_model("gemini-lite", tier="simple")
+        synth_model = MODELS.get(synth_alias, "google/gemini-3.8-flash")
         messages = [
             {"role": "system", "content": "You are a synthesis agent. Merge multiple AI responses into one authoritative answer."},
             {"role": "user", "content": synth_prompt},
@@ -1545,7 +1581,7 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         merged, _ = call_model(
             synth_model, messages,
             max_tokens=2048, temperature=0.3,
-            provider_name="gemini-lite", purpose="synthesis",
+            provider_name=synth_alias, purpose="synthesis",
         )
 
         PROVENANCE.record("consensus_query", f"consensus_{int(time.time())}", "arena", {
@@ -1716,16 +1752,17 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         )
 
         try:
+            arch_alias = _pick_available_model("claude", tier="hard")
             arch_content, arch_usage = call_model(
-                MODELS["claude"],
+                MODELS.get(arch_alias, MODELS["claude"]),
                 [{"role": "user", "content": architect_prompt}],
                 max_tokens=1500,
-                provider_name="claude", purpose="orchestrate_plan",
+                provider_name=arch_alias, purpose="orchestrate_plan",
             )
             arch_content = arch_content.replace("```json", "").replace("```", "").strip()
             spec = json.loads(arch_content)
 
-            PROVENANCE.record("orchestrate_plan", spec.get("name", "orch"), "claude", {
+            PROVENANCE.record("orchestrate_plan", spec.get("name", "orch"), arch_alias, {
                 "task": task[:100], "language": spec.get("language", "python"),
             })
 
@@ -1822,7 +1859,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
         if winner and winner["code"]:
             out_dir = PROJECT_ROOT / "output" / "orchestrate"
             out_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = spec.get("name", "solution").replace(" ", "_")[:40]
+            raw_name = str(spec.get("name", "solution"))
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_name)[:40] or "solution"
             out_file = out_dir / f"{safe_name}_{int(time.time())}.{_ext_for_lang(lang)}"
             out_file.write_text(winner["code"], encoding="utf-8")
             output_path = str(out_file)
@@ -1993,8 +2031,8 @@ class ForgeHandler(SimpleHTTPRequestHandler):
     def _cors(self):
         """CORS headers — locked to localhost; unknown origins get no ACAO (browser blocks read)."""
         origin = self.headers.get("Origin", "")
-        if not origin or re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin):
-            self.send_header("Access-Control-Allow-Origin", origin or "*")
+        if origin and re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Forge-Key, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 

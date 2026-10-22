@@ -56,6 +56,7 @@ class ProvenanceChain:
         self._entries: list[ProvenanceEntry] = []
         self._head_hash: str = "0" * 64  # genesis
         self._persist_path: Optional[Path] = Path(persist_path) if persist_path else None
+        self.tampered_at_load: bool = False
 
     def record(self, event_type: str, entity_id: str, actor: str, data: dict | None = None) -> ProvenanceEntry:
         with self._lock:
@@ -77,10 +78,12 @@ class ProvenanceChain:
             return entry
 
     def verify_integrity(self) -> tuple[bool, int]:
-        """Verify the entire chain. Returns (valid, entry_count)."""
+        """Verify the entire chain. Returns (valid, entry_count_or_failed_index)."""
         with self._lock:
             prev_hash = "0" * 64
             for i, entry in enumerate(self._entries):
+                if entry.parent_hash != prev_hash:
+                    return False, i
                 expected = ProvenanceEntry(
                     timestamp=entry.timestamp,
                     event_type=entry.event_type,
@@ -126,29 +129,19 @@ class ProvenanceChain:
             } for e in self._entries], indent=2)
 
     # ── Disk Persistence ──────────────────────────────────────────────────
-    # Without persistence the entire "tamper-evident" ledger was lost on
-    # every server restart, defeating its core purpose.
 
     def save_to_disk(self, path: str | Path) -> None:
-        """Atomically persist the chain to disk.
-
-        Uses a write-to-temp-then-rename strategy so a crash mid-write
-        never corrupts the on-disk copy.
-        """
+        """Atomically persist the chain to disk."""
         with self._lock:
             target = Path(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_suffix(".tmp")
             tmp.write_text(self.export_json(), encoding="utf-8")
-            tmp.replace(target)  # atomic on POSIX; near-atomic on NTFS
+            tmp.replace(target)
 
     @classmethod
     def load_from_disk(cls, path: str | Path) -> "ProvenanceChain":
-        """Restore a chain from a previously-saved JSON file.
-
-        Validates hash-chain integrity on load — if the file has been
-        tampered with, verification will detect it immediately.
-        """
+        """Restore a chain from a previously-saved JSON file and verify integrity."""
         target = Path(path)
         chain = cls(persist_path=target)
         if not target.exists():
@@ -167,8 +160,10 @@ class ProvenanceChain:
                 )
                 chain._entries.append(entry)
                 chain._head_hash = entry.entry_hash
+            valid, _ = chain.verify_integrity()
+            if not valid:
+                chain.tampered_at_load = True
         except (json.JSONDecodeError, KeyError, TypeError):
-            # Corrupted file — start fresh rather than crash
             return cls(persist_path=target)
         return chain
 
@@ -195,23 +190,35 @@ DEFAULT_POLICIES = [
     Policy("regression_prevention", "Champion must beat current best by >2σ", "regression_check"),
     Policy("novelty_threshold", "Reject submissions with <10% code distance from population", "novelty_check"),
     Policy("max_complexity", "Reject code exceeding cyclomatic complexity threshold", "complexity_check"),
-    Policy("audit_all_promotions", "Log all champion promotions to provenance chain", "audit_promotion"),
+    Policy("audit_all_promotions", "Log all champion promotions to provenance chain", "audit_promotion", action="log"),
 ]
 
 
 class PolicyEngine:
     """Evaluate governance policies before agent actions."""
 
-    # Fully-qualified (or bare) callable names that indicate real file I/O,
-    # process execution, dynamic code execution, or network access when
-    # found in the AST of Python source — this catches renamed imports /
-    # aliasing / string-built calls that the naive substring scan misses,
-    # e.g. `import os as o; o.system(...)`, `getattr(os, "sys" + "tem")(...)`
-    # would still slip an AST scan too, but direct calls are now caught
-    # regardless of surrounding string literals or comments.
-    _AST_FILE_CALLS = {"open", "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree", "shutil.move", "Path.write_text", "Path.write_bytes"}
-    _AST_PROCESS_CALLS = {"os.system", "os.popen", "os.exec", "os.execv", "os.execve", "os.spawnv", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen", "eval", "exec", "compile"}
-    _AST_NETWORK_CALLS = {"socket.socket", "urllib.request.urlopen", "requests.get", "requests.post", "http.client.HTTPConnection"}
+    _AST_FILE_CALLS = {
+        "open", "os.remove", "os.unlink", "os.rmdir",
+        "shutil.rmtree", "shutil.move", "Path.write_text", "Path.write_bytes",
+    }
+    _AST_FILE_BARE = {"open", "rmtree", "unlink", "rmdir", "write_text", "write_bytes"}
+
+    _AST_PROCESS_CALLS = {
+        "os.system", "os.popen", "os.exec", "os.execv", "os.execve", "os.spawnv",
+        "subprocess.run", "subprocess.call", "subprocess.check_call",
+        "subprocess.check_output", "subprocess.Popen", "eval", "exec", "compile",
+    }
+    _AST_PROCESS_BARE = {
+        "eval", "exec", "compile", "Popen", "check_call", "check_output",
+        "execv", "execve", "spawnv", "popen",
+    }
+
+    _AST_NETWORK_CALLS = {
+        "socket.socket", "urllib.request.urlopen", "requests.get",
+        "requests.post", "requests.put", "requests.delete", "requests.request",
+        "http.client.HTTPConnection", "http.client.HTTPSConnection",
+    }
+    _AST_NETWORK_BARE = {"urlopen", "HTTPConnection", "HTTPSConnection"}
 
     def __init__(self, policies: list[Policy] | None = None):
         self.policies = policies or list(DEFAULT_POLICIES)
@@ -222,7 +229,6 @@ class PolicyEngine:
         for policy in self.policies:
             if not policy.enabled:
                 continue
-            # Simplified policy evaluation
             violated = self._evaluate(policy, context)
             if violated:
                 violations.append({
@@ -233,9 +239,8 @@ class PolicyEngine:
         return violations
 
     @staticmethod
-    def _call_name(node: ast.Call) -> str:
-        """Best-effort resolution of a Call node's callee to a dotted name,
-        e.g. `os.system(...)` -> "os.system", `eval(...)` -> "eval"."""
+    def _call_name(node: ast.Call, aliases: dict[str, str] | None = None) -> str:
+        """Resolve a Call node's callee to a canonical dotted name using import aliases."""
         func = node.func
         parts: list[str] = []
         while isinstance(func, ast.Attribute):
@@ -243,71 +248,97 @@ class PolicyEngine:
             func = func.value
         if isinstance(func, ast.Name):
             parts.append(func.id)
-        return ".".join(reversed(parts))
+        if not parts:
+            return ""
+        parts.reverse()
+        if aliases and parts[0] in aliases:
+            resolved_prefix = aliases[parts[0]]
+            parts = resolved_prefix.split(".") + parts[1:]
+        return ".".join(parts)
 
     def _ast_call_names(self, source: str) -> Optional[set[str]]:
-        """Parse `source` as Python and return the set of resolved call
-        names found. Returns None if the source isn't parseable Python
-        (e.g. it's Vitalis/.sl, Rust, Go, TypeScript, etc.) — in that case
-        callers should fall back to substring scanning only."""
+        """Parse `source` as Python and return resolved call names (with import alias expansion)."""
+        if not source or not source.strip():
+            return set()
         try:
             tree = ast.parse(source)
         except (SyntaxError, ValueError):
             return None
+
+        aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        aliases[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    aliases[local_name] = f"{node.module}.{alias.name}"
+
         names = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
-                name = self._call_name(node)
+                name = self._call_name(node, aliases)
                 if name:
                     names.add(name)
-                    if "." in name:
-                        # Also record the bare trailing attribute so an
-                        # aliased import (`import os as o; o.system(...)`)
-                        # or `from subprocess import Popen; Popen(...)`
-                        # still matches a dotted target like "os.system".
-                        names.add(name.rsplit(".", 1)[-1])
         return names
 
-    def _matches_any(self, call_names: set[str], targets: set[str]) -> bool:
-        for target in targets:
-            if target in call_names:
+    def _matches_any(self, call_names: set[str], qualified_targets: set[str], bare_targets: set[str] | None = None) -> bool:
+        bare_targets = bare_targets or set()
+        for call in call_names:
+            if call in qualified_targets or call in bare_targets:
                 return True
-            # allow suffix match for module-qualified variants, e.g. a call
-            # resolved as "subprocess.Popen" matches target "subprocess.Popen"
-            # and a bare "Popen" (imported via `from subprocess import Popen`)
-            bare = target.rsplit(".", 1)[-1]
-            if bare in call_names:
-                return True
+            if "." in call:
+                suffix = call.rsplit(".", 1)[-1]
+                if suffix in bare_targets:
+                    return True
         return False
 
     def _evaluate(self, policy: Policy, context: dict) -> bool:
-        """Check if a policy is violated. Returns True if violated.
-
-        Uses an AST-based scan of Python call sites as the primary check
-        (catches renamed/aliased calls that a naive substring scan misses),
-        falling back to substring scanning for non-Python source (Vitalis
-        .sl, Rust, Go, TypeScript, ...) where no Python AST is available.
-        """
+        """Check if a policy is violated. Returns True if violated."""
         source = context.get("source_code", "")
-        call_names = self._ast_call_names(source)
+        call_names = self._ast_call_names(source) if source else set()
 
         if policy.check == "capability_gate_file":
-            if call_names is not None and self._matches_any(call_names, self._AST_FILE_CALLS):
+            if call_names is not None and self._matches_any(call_names, self._AST_FILE_CALLS, self._AST_FILE_BARE):
                 return True
-            return any(p in source for p in ("file_write", "file_delete", "file_append"))
+            return any(p in source for p in ("file_write", "file_delete", "file_append", "std::fs::"))
         if policy.check == "capability_gate_network":
-            if call_names is not None and self._matches_any(call_names, self._AST_NETWORK_CALLS):
+            if call_names is not None and self._matches_any(call_names, self._AST_NETWORK_CALLS, self._AST_NETWORK_BARE):
                 return True
-            return any(p in source for p in ("http_get", "http_post", "tcp_connect"))
+            return any(p in source for p in ("http_get", "http_post", "tcp_connect", "std::net::"))
         if policy.check == "capability_gate_process":
-            if call_names is not None and self._matches_any(call_names, self._AST_PROCESS_CALLS):
+            if call_names is not None and self._matches_any(call_names, self._AST_PROCESS_CALLS, self._AST_PROCESS_BARE):
                 return True
-            return any(p in source for p in ("process_exec", "dlopen"))
+            return any(p in source for p in ("process_exec", "dlopen", "std::process::Command"))
         if policy.check == "budget_check":
-            return context.get("budget_exhausted", False)
+            return bool(context.get("budget_exhausted", False))
+        if policy.check == "type_check_preflight":
+            return context.get("type_check_passed") is False
+        if policy.check == "timeout_check":
+            if context.get("timed_out", False):
+                return True
+            if "elapsed_ms" in context and "timeout_ms" in context:
+                return float(context["elapsed_ms"]) > float(context["timeout_ms"])
+            return False
+        if policy.check == "regression_check":
+            if context.get("regression_detected", False):
+                return True
+            if "candidate_fitness" in context and "champion_fitness" in context:
+                return float(context["candidate_fitness"]) + 1e-9 < float(context["champion_fitness"])
+            return False
+        if policy.check == "novelty_check":
+            if "novelty_distance" in context:
+                return float(context["novelty_distance"]) < float(context.get("min_novelty", 0.10))
+            return False
         if policy.check == "complexity_check":
             max_cc = context.get("max_cyclomatic", 50)
             return context.get("cyclomatic_complexity", 0) > max_cc
+        if policy.check == "audit_promotion":
+            if context.get("event_type") == "promotion" and not context.get("provenance_logged", False):
+                return True
+            return False
         return False
 
 
@@ -354,12 +385,7 @@ class CircuitBreaker:
     """Thread-safe circuit breaker for API calls.
 
     Opens (blocks calls) after N consecutive failures.
-    Half-opens after cooldown to test recovery.
-
-    Thread safety: ForgeHandler runs inside ThreadingHTTPServer which
-    dispatches each request on a separate thread. Without a lock,
-    concurrent requests could corrupt _failure_count / _state leading
-    to either phantom-open or stuck-closed states.
+    Half-opens after cooldown to test recovery with a single probe request.
     """
 
     def __init__(self, failure_threshold: int = 5, cooldown_seconds: float = 60.0):
@@ -369,17 +395,20 @@ class CircuitBreaker:
         self._cooldown = cooldown_seconds
         self._last_failure: float = 0
         self._state: str = "closed"  # closed, open, half-open
+        self._half_open_in_flight: bool = False
 
     def record_success(self):
         with self._lock:
             self._failure_count = 0
             self._state = "closed"
+            self._half_open_in_flight = False
 
     def record_failure(self):
         with self._lock:
             self._failure_count += 1
             self._last_failure = time.time()
-            if self._failure_count >= self._threshold:
+            self._half_open_in_flight = False
+            if self._failure_count >= self._threshold or self._state == "half-open":
                 self._state = "open"
 
     def can_proceed(self) -> bool:
@@ -389,14 +418,20 @@ class CircuitBreaker:
             if self._state == "open":
                 if time.time() - self._last_failure > self._cooldown:
                     self._state = "half-open"
+                    self._half_open_in_flight = True
                     return True
                 return False
-            # half-open: allow one attempt
-            return True
+            # half-open: allow only one concurrent probe attempt
+            if not self._half_open_in_flight:
+                self._half_open_in_flight = True
+                return True
+            return False
 
     @property
     def state(self) -> str:
         with self._lock:
+            if self._state == "open" and (time.time() - self._last_failure > self._cooldown):
+                return "half-open"
             return self._state
 
 
@@ -433,11 +468,13 @@ def generate_compliance_report(chain: ProvenanceChain, tournament_id: str) -> st
 _chain: Optional[ProvenanceChain] = None
 _policy: Optional[PolicyEngine] = None
 
+
 def get_provenance() -> ProvenanceChain:
     global _chain
     if _chain is None:
         _chain = ProvenanceChain.load_from_disk(_DEFAULT_PROVENANCE_PATH)
     return _chain
+
 
 def get_policy_engine() -> PolicyEngine:
     global _policy

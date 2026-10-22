@@ -6,7 +6,7 @@ Takes a factory-built artifact and wires it into its natural habitat:
   mcp_server   → generates mcp.json config for Cursor + VS Code Copilot
   api          → generates Dockerfile + docker-compose.yml + start script
   cli          → generates setup.py / pyproject.toml for pip install
-  workflow     → copies to .github/workflows/ of a target git repo
+  workflow     → generates workflow.yml + .github/workflows/ instructions
   extension    → generates package.json + vsce build command
   rust_lib     → generates Cargo.toml + tests structure ready for cargo build
   go_service   → generates go.mod + Makefile + Dockerfile ready for go run
@@ -22,10 +22,9 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +43,7 @@ class DeploymentResult:
     commands: list[str]          # shell commands to run
     instructions: str            # human-readable what to do next
     mcp_config: Optional[dict] = None  # if applicable
+    policy_violations: list[dict] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
@@ -64,13 +64,18 @@ class DeploymentResult:
 
 # ── Main Deploy Function ──────────────────────────────────────────────────────
 
-def deploy(result: FactoryResult, target_dir: Optional[Path] = None) -> DeploymentResult:
+def deploy(
+    result: FactoryResult,
+    target_dir: Optional[Path] = None,
+    deploy_dir: Optional[Path] = None,
+) -> DeploymentResult:
     """
     Wire a factory result into its deployment target.
     
     Args:
         result: FactoryResult from factory.build()
         target_dir: Optional override for deployment directory
+        deploy_dir: Alias for target_dir
     
     Returns:
         DeploymentResult with all generated files and run commands
@@ -80,7 +85,16 @@ def deploy(result: FactoryResult, target_dir: Optional[Path] = None) -> Deployme
 
     art = result.winner
     base = result.output_path or (Path(__file__).resolve().parent.parent / "output" / result.run_id)
-    deploy_dir = target_dir or base
+    out_dir = Path(target_dir or deploy_dir or base)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Universal governance policy audit across all deployed artifacts
+    violations = []
+    try:
+        policy = get_policy_engine()
+        violations = policy.check_all({"source_code": art.source})
+    except Exception:
+        pass
 
     deployers = {
         "mcp_server":   _deploy_mcp_server,
@@ -103,7 +117,10 @@ def deploy(result: FactoryResult, target_dir: Optional[Path] = None) -> Deployme
     }
 
     deployer_fn = deployers.get(art.artifact_type, _deploy_generic)
-    return deployer_fn(art, result.run_id, deploy_dir)
+    dep_res = deployer_fn(art, result.run_id, out_dir)
+    dep_res.artifact_type = art.artifact_type or dep_res.artifact_type
+    dep_res.policy_violations = violations
+    return dep_res
 
 
 # ── Per-Type Deployers ────────────────────────────────────────────────────────
@@ -166,7 +183,7 @@ def _deploy_mcp_server(art: Artifact, run_id: str, out: Path) -> DeploymentResul
     files.append("README.md")
 
     return DeploymentResult(
-        artifact_type="mcp_server",
+        artifact_type=art.artifact_type or "mcp_server",
         run_id=run_id,
         output_path=out,
         files_created=files,
@@ -192,26 +209,26 @@ def _deploy_api(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
 
     # requirements.txt
     req = out / "requirements.txt"
-    req.write_text("fastapi>=0.110.0\nuvicorn[standard]>=0.29.0\npydantic>=2.0\nhttpx>=0.27.0\npython-dotenv>=1.0.0\n")
+    req.write_text("fastapi>=0.110.0\nuvicorn[standard]>=0.29.0\npydantic>=2.0\nhttpx>=0.27.0\npython-dotenv>=1.0.0\n", encoding="utf-8")
     files.append("requirements.txt")
 
     # Dockerfile
     dockerfile = out / "Dockerfile"
-    dockerfile.write_text(textwrap.dedent(f"""
+    dockerfile.write_text(textwrap.dedent("""
         FROM python:3.12-slim
         WORKDIR /app
         COPY requirements.txt .
-        RUN pip install -r requirements.txt
+        RUN pip install --no-cache-dir -r requirements.txt
         COPY main.py .
         ENV PORT=8000
         EXPOSE 8000
         CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("Dockerfile")
 
     # docker-compose
     compose = out / "docker-compose.yml"
-    compose.write_text(textwrap.dedent(f"""
+    compose.write_text(textwrap.dedent("""
         version: "3.9"
         services:
           api:
@@ -220,16 +237,16 @@ def _deploy_api(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
               - "8000:8000"
             env_file: .env
             restart: unless-stopped
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("docker-compose.yml")
 
     # .env template
     env = out / ".env.example"
-    env.write_text("# Add your environment variables here\n# API_KEY=your_key\n")
+    env.write_text("# Add your environment variables here\n# API_KEY=your_key\n", encoding="utf-8")
     files.append(".env.example")
 
     return DeploymentResult(
-        artifact_type="api",
+        artifact_type=art.artifact_type or "api",
         run_id=run_id,
         output_path=out,
         files_created=files,
@@ -261,7 +278,7 @@ def _deploy_cli(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     pyproject.write_text(textwrap.dedent(f"""
         [build-system]
         requires = ["setuptools>=68"]
-        build-backend = "setuptools.backends.legacy:build"
+        build-backend = "setuptools.build_meta"
 
         [project]
         name = "forge-tool-{run_id[:8]}"
@@ -270,16 +287,16 @@ def _deploy_cli(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
 
         [project.scripts]
         forge-tool = "tool:main"
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("pyproject.toml")
 
     # run.sh
     run_sh = out / "run.sh"
-    run_sh.write_text("#!/bin/bash\npython tool.py \"$@\"\n")
+    run_sh.write_text("#!/bin/bash\npython tool.py \"$@\"\n", encoding="utf-8")
     files.append("run.sh")
 
     return DeploymentResult(
-        artifact_type="cli",
+        artifact_type=art.artifact_type or "cli",
         run_id=run_id,
         output_path=out,
         files_created=files,
@@ -289,7 +306,7 @@ def _deploy_cli(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
             f"pip install -e {out}",
             "forge-tool --help",
         ],
-        instructions="CLI ready. Run python tool.py --help or pip install -e . for global access.",
+        instructions="CLI/SDK ready. Run python tool.py --help or pip install -e . for global access.",
     )
 
 
@@ -302,7 +319,7 @@ def _deploy_agent(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
 
     # requirements.txt
     req = out / "requirements.txt"
-    req.write_text("httpx>=0.27.0\npython-dotenv>=1.0.0\n")
+    req.write_text("httpx>=0.27.0\npython-dotenv>=1.0.0\n", encoding="utf-8")
     files.append("requirements.txt")
 
     # run.sh
@@ -313,14 +330,14 @@ def _deploy_agent(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
         if [ ! -f .env ]; then cp .env.example .env; fi
         pip install -r requirements.txt -q
         python agent.py "$@"
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("run.sh")
 
     # systemd service
     service = out / "agent.service"
     service.write_text(textwrap.dedent(f"""
         [Unit]
-        Description=Forge Agent {run_id[:8]}
+        Description=Forge Agent {run_id[:8]} ({art.artifact_type or 'agent'})
         After=network.target
 
         [Service]
@@ -331,16 +348,16 @@ def _deploy_agent(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
 
         [Install]
         WantedBy=multi-user.target
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("agent.service")
 
     # .env template
     env = out / ".env.example"
-    env.write_text("OPENROUTER_API_KEY=\nLOG_LEVEL=INFO\n")
+    env.write_text("OPENROUTER_API_KEY=\nLOG_LEVEL=INFO\n", encoding="utf-8")
     files.append(".env.example")
 
     return DeploymentResult(
-        artifact_type="agent",
+        artifact_type=art.artifact_type or "agent",
         run_id=run_id,
         output_path=out,
         files_created=files,
@@ -348,9 +365,9 @@ def _deploy_agent(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
             "cp .env.example .env && nano .env",
             "bash run.sh",
             "# OR as a service:",
-            f"sudo cp agent.service /etc/systemd/system/ && sudo systemctl enable agent",
+            "sudo cp agent.service /etc/systemd/system/ && sudo systemctl enable agent",
         ],
-        instructions="Agent ready. Copy .env.example to .env, add your API keys, then bash run.sh.",
+        instructions=f"{(art.artifact_type or 'agent').capitalize()} ready. Copy .env.example to .env, add your API keys, then bash run.sh.",
     )
 
 
@@ -358,7 +375,7 @@ def _deploy_rust(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     files = []
 
     src_dir = out / "src"
-    src_dir.mkdir(exist_ok=True)
+    src_dir.mkdir(parents=True, exist_ok=True)
     lib_rs = src_dir / "lib.rs"
     lib_rs.write_text(art.source, encoding="utf-8")
     files.append("src/lib.rs")
@@ -377,7 +394,7 @@ def _deploy_rust(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
 
         [dev-dependencies]
         tokio = {{ version = "1", features = ["full"] }}
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("Cargo.toml")
 
     return DeploymentResult(
@@ -412,7 +429,7 @@ def _deploy_go(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
         require (
             github.com/gin-gonic/gin v1.10.0
         )
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("go.mod")
 
     makefile = out / "Makefile"
@@ -430,7 +447,7 @@ def _deploy_go(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
 
         docker:
         \tdocker build -t forge-service .
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("Makefile")
 
     dockerfile = out / "Dockerfile"
@@ -447,7 +464,7 @@ def _deploy_go(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
         COPY --from=builder /app/service .
         EXPOSE 8080
         CMD ["./service"]
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("Dockerfile")
 
     return DeploymentResult(
@@ -492,7 +509,7 @@ def _deploy_react(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
             "build": "next build",
             "start": "next start",
         }
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     files.append("package.json")
 
     return DeploymentResult(
@@ -525,11 +542,11 @@ def _deploy_terraform(art: Artifact, run_id: str, out: Path) -> DeploymentResult
             region = "us-east-1"
           }
         }
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("backend.tf")
 
     tfvars = out / "terraform.tfvars.example"
-    tfvars.write_text("# Fill in your variable values\n# region = \"us-east-1\"\n")
+    tfvars.write_text("# Fill in your variable values\n# region = \"us-east-1\"\n", encoding="utf-8")
     files.append("terraform.tfvars.example")
 
     return DeploymentResult(
@@ -550,19 +567,10 @@ def _deploy_terraform(art: Artifact, run_id: str, out: Path) -> DeploymentResult
 def _deploy_workflow(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     files = []
 
-    # Default: write to .github/workflows/ of CWD if it exists
-    cwd = Path(os.getcwd())
-    gh_dir = cwd / ".github" / "workflows"
-    if gh_dir.exists():
-        target = gh_dir / f"forge-{run_id[:8]}.yml"
-        target.write_text(art.source, encoding="utf-8")
-        files.append(str(target))
-        deployed_to = str(target)
-    else:
-        wf = out / "workflow.yml"
-        wf.write_text(art.source, encoding="utf-8")
-        files.append("workflow.yml")
-        deployed_to = f"{out}/workflow.yml → copy to .github/workflows/"
+    wf = out / "workflow.yml"
+    wf.write_text(art.source, encoding="utf-8")
+    files.append("workflow.yml")
+    deployed_to = f"{out}/workflow.yml → copy to .github/workflows/"
 
     return DeploymentResult(
         artifact_type="workflow",
@@ -603,7 +611,7 @@ def _deploy_extension(art: Artifact, run_id: str, out: Path) -> DeploymentResult
             "typescript": "^5.0.0",
             "@vscode/vsce": "^2.0.0",
         }
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     files.append("package.json")
 
     tsconfig = out / "tsconfig.json"
@@ -616,7 +624,7 @@ def _deploy_extension(art: Artifact, run_id: str, out: Path) -> DeploymentResult
             "strict": True,
         },
         "exclude": ["node_modules", ".vscode-test"]
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     files.append("tsconfig.json")
 
     return DeploymentResult(
@@ -644,7 +652,7 @@ def _deploy_docker(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     files.append("Dockerfile")
 
     compose = out / "docker-compose.yml"
-    compose.write_text(textwrap.dedent(f"""
+    compose.write_text(textwrap.dedent("""
         version: "3.9"
         services:
           app:
@@ -653,7 +661,7 @@ def _deploy_docker(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
               - "8000:8000"
             env_file: .env
             restart: unless-stopped
-    """).strip())
+    """).strip(), encoding="utf-8")
     files.append("docker-compose.yml")
 
     tag = f"forge-app-{run_id[:8]}"
@@ -700,7 +708,7 @@ def _deploy_skill(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
         files_created=files,
         commands=[
             "# Register to Forge marketplace:",
-            f"python forge_cli.py market search",
+            "python forge_cli.py market search",
             "# Compile directly:",
             f"python forge_cli.py compile {source_sl}",
         ],
@@ -715,7 +723,7 @@ def _deploy_generic(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     files.append(out_file.name)
 
     return DeploymentResult(
-        artifact_type=art.artifact_type,
+        artifact_type=art.artifact_type or "generic",
         run_id=run_id,
         output_path=out,
         files_created=files,
