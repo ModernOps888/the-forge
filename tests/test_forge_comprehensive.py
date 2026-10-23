@@ -31,7 +31,7 @@ class TestForgeCoreSuite(unittest.TestCase):
 
     def test_01_sdk_exports_and_version(self):
         import forge
-        self.assertEqual(forge.__version__, "2.4.0")
+        self.assertEqual(forge.__version__, "2.5.0")
         required_exports = [
             "Arena", "ArenaConfig", "Challenge", "Submission", "FitnessScore",
             "CompilationGate", "Provider", "CompilationResult", "Tournament",
@@ -41,7 +41,8 @@ class TestForgeCoreSuite(unittest.TestCase):
             "fitness_score", "get_memory", "get_provenance", "get_policy_engine",
             "get_marketplace", "get_tracer", "get_tracker", "BudgetConfig",
             "BudgetTracker", "CostTracker", "create_replay_config", "run_replay",
-            "run_ab_test",
+            "run_ab_test", "kls_spectral_diagnostics", "StochasticLocalizationState",
+            "stochastic_localization_select",
         ]
         for sym in required_exports:
             self.assertTrue(hasattr(forge, sym), f"Missing export in forge.__init__: {sym}")
@@ -265,17 +266,19 @@ class TestForgeCoreSuite(unittest.TestCase):
         from forge.factory import _extract_code, _detect_type, Artifact, FactoryResult, ARTIFACT_TYPES, LANG_MAP
         from forge.deployer import deploy
 
-        self.assertEqual(len(ARTIFACT_TYPES), 17)
+        self.assertEqual(len(ARTIFACT_TYPES), 18)
+        self.assertIn("lean4_proof", ARTIFACT_TYPES)
 
         # Verify fence extraction with hyphenated language tag
         raw_md = "Here is the code:\n```objective-c\nint main() { return 0; }\n```\nDone."
         self.assertEqual(_extract_code(raw_md, "objective-c"), "int main() { return 0; }")
 
-        # Verify _detect_type supports all new types
+        # Verify _detect_type supports all new types including lean4_proof
         self.assertEqual(_detect_type("Build a Slack integration bot"), "integration")
         self.assertEqual(_detect_type("Create a VS Code extension for linting"), "extension")
         self.assertEqual(_detect_type("Write a multi-stage Dockerfile for FastAPI"), "docker")
         self.assertEqual(_detect_type("Build a full stack web app with React and FastAPI"), "full_project")
+        self.assertEqual(_detect_type("Formalize a Lean 4 proof of the KLS conjecture Poincaré bound"), "lean4_proof")
 
         # Verify leaderboard() method on FactoryResult
         a1 = Artifact(provider_name="claude", source="def main():\n    return 1\n", score_total=91.5, heuristic_total=22.0)
@@ -442,7 +445,7 @@ class TestForgeCoreSuite(unittest.TestCase):
             with urllib.request.urlopen(f"{base_url}/api/health", timeout=5) as resp:
                 health = json.loads(resp.read().decode("utf-8"))
                 self.assertEqual(health["status"], "ok")
-                self.assertEqual(health["artifact_types"], 17)
+                self.assertEqual(health["artifact_types"], 18)
 
             with urllib.request.urlopen(f"{base_url}/api/auth-bootstrap", timeout=5) as resp:
                 boot = json.loads(resp.read().decode("utf-8"))
@@ -508,7 +511,7 @@ class TestForgeCoreSuite(unittest.TestCase):
 
         # Initialize
         init_resp = forge_mcp.handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-        self.assertEqual(init_resp["result"]["serverInfo"]["version"], "2.4.0")
+        self.assertEqual(init_resp["result"]["serverInfo"]["version"], "2.5.0")
 
         # Tools list
         list_resp = forge_mcp.handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -536,6 +539,101 @@ class TestForgeCoreSuite(unittest.TestCase):
         self.assertTrue(bench_payload["success"])
         self.assertEqual(bench_payload["runs"], 3)
         self.assertEqual(len(bench_payload["ci_95_ms"]), 2)
+
+    def test_12_kls_stochastic_localization_and_lean4_proof(self):
+        from forge import (
+            Arena, ArenaConfig, Challenge, Submission, FitnessScore,
+            StochasticLocalizationState, stochastic_localization_select,
+            kls_spectral_diagnostics, fitness_score,
+        )
+        from forge.evolution import _ngram_vector
+        from forge.arena import mock_provider
+
+        # 1. Test KLS spectral diagnostics & KLS500 Poincaré bound on synthetic population
+        sources = [
+            "fn sort(a: [i64]) -> [i64] { insertion_sort(a) }",
+            "fn sort(a: [i64]) -> [i64] { if a.len() < 2 { return a; } merge_sorted(a.slice(0, 1), a.slice(1, a.len())) }",
+            "fn sort(a: [i64]) -> [i64] { let mut r: [i64] = a; r }",
+            "fn sort(a: [i64]) -> [i64] { if a.len() == 0 { return []; } insertion_sort(a) }",
+        ]
+        scores = [92.5, 95.0, 58.0, 93.8]
+        vecs = [_ngram_vector(s, dim=64) for s in sources]
+        diag = kls_spectral_diagnostics(vecs, scores)
+        self.assertEqual(diag["dimension"], 64)
+        self.assertEqual(diag["sample_size"], 4)
+        self.assertGreater(diag["fitness_variance"], 0.0)
+        self.assertGreater(diag["dirichlet_gradient_energy"], 0.0)
+        self.assertGreater(diag["poincare_ratio"], 0.0)
+        self.assertTrue(diag["kls500_bound_satisfied"])
+
+        # 2. Test Stochastic Localization Tilt Selection
+        subs = [
+            Submission(source_code=s, fitness=FitnessScore(correctness=sc / 100.0, performance=sc / 100.0))
+            for s, sc in zip(sources, scores)
+        ]
+        state = StochasticLocalizationState(dim=64)
+        picked = stochastic_localization_select(subs, state=state, temperature=0.8, dt=0.2, advance_step=True)
+        self.assertIsNotNone(picked)
+        self.assertEqual(state.steps, 1)
+        self.assertAlmostEqual(state.t, 0.2, places=6)
+        self.assertTrue(any(abs(v) > 0.0 for v in state.tilt_vector))
+
+        # 3. Test Arena trajectory pruning + director_hook + kls_history
+        steered_calls = []
+        def director(gen, kls_d):
+            steered_calls.append((gen.number, kls_d["poincare_ratio"]))
+            return None  # delegate to automatic trajectory pruning
+
+        challenge = Challenge(
+            name="Sort KLS",
+            description="Sort integers in ascending order",
+            function_signature="fn sort(arr: [i64]) -> [i64]",
+            test_cases=[{"input": "[3, 1, 2]", "expected": "[1, 2, 3]"}],
+        )
+        cfg = ArenaConfig(
+            max_generations=3,
+            population_size=8,
+            elite_count=2,
+            enable_trajectory_pruning=True,
+            trajectory_prune_patience=1,
+            trajectory_prune_gap=5.0,
+            director_hook=director,
+            verbose=False,
+        )
+        arena = Arena(config=cfg)
+        for name in ("claude", "gpt", "gemini", "deepseek"):
+            arena.register_provider(name, mock_provider(name))
+        t = arena.run(challenge)
+        self.assertGreaterEqual(len(arena.kls_history), 2)
+        self.assertGreaterEqual(len(steered_calls), 2)
+        self.assertTrue(all(d["kls500_bound_satisfied"] for d in arena.kls_history))
+        self.assertIsNotNone(t.champion)
+
+        # 4. Test Lean 4 formal proof scorer (kernel trust level zero vs `sorry` penalty)
+        valid_lean4 = """
+        structure IsotropicMeasure (n : Nat) where
+          poincare_const : Nat
+          bound_kls500 : poincare_const <= 500
+
+        lemma kls500_refl (m : IsotropicMeasure n) : m.poincare_const <= 500 := by
+          exact m.bound_kls500
+
+        theorem song_zhang_kls_bound (m : IsotropicMeasure n) : m.poincare_const <= 500 := by
+          have h := kls500_refl m
+          exact h
+
+        #print axioms song_zhang_kls_bound
+        """
+        sorry_lean4 = """
+        theorem broken_kls_bound (n : Nat) : n <= 500 := by
+          sorry
+        """
+        rep_valid = fitness_score(valid_lean4, "lean4")
+        rep_sorry = fitness_score(sorry_lean4, "lean4")
+        self.assertEqual(rep_valid.language, "lean4")
+        self.assertGreater(rep_valid.correctness.score, 0.90)
+        self.assertLess(rep_sorry.correctness.score, 0.50)
+        self.assertGreater(rep_valid.total, rep_sorry.total + 20.0)
 
 
 if __name__ == "__main__":

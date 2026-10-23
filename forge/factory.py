@@ -66,9 +66,10 @@ ARTIFACT_TYPES = {
     "workflow":     "GitHub Actions / CI-CD workflow YAML",
     "extension":    "VS Code extension in TypeScript",
     "docker":       "Dockerfile + docker-compose.yml",
-    # Native
+    # Native & Formal Verification
     "skill":        "Vitalis .sl hot-path function (compiled to native)",
     "full_project": "Complete multi-file project with structure, deps, README",
+    "lean4_proof":  "Lean 4 formal mathematical proof & invariant specification (kernel trust level zero)",
 }
 
 LANG_MAP = {
@@ -89,6 +90,7 @@ LANG_MAP = {
     "docker":       "dockerfile",
     "skill":        "vitalis",
     "full_project": "python",
+    "lean4_proof":  "lean4",
 }
 
 
@@ -488,6 +490,8 @@ def _save_artifacts(
 def _detect_type(description: str) -> str:
     """Heuristic type detection from description."""
     d = description.lower()
+    if any(k in d for k in ("lean 4", "lean4", "formal proof", "theorem", "kls", "conjecture", "poincare", "isoperimetric")):
+        return "lean4_proof"
     if any(k in d for k in ("full project", "full stack", "full-stack", "multi-file", "complete project", "monorepo")):
         return "full_project"
     if any(k in d for k in ("dockerfile", "docker-compose", "docker", "container")):
@@ -620,6 +624,13 @@ def _build_prompt(description: str, artifact_type: str, language: str, extra: st
             "signature verification (HMAC-SHA256), request validation, "
             "event routing, retry queue, idempotency, health check."
         ),
+        "lean4_proof": (
+            "Write a complete, machine-checkable Lean 4 formal proof and invariant specification "
+            "(kernel trust level zero, zero `sorry` or `admit` axioms). Include: "
+            "explicit `structure` or `def` definitions, auxiliary `lemma` declarations, main `theorem` "
+            "proved with constructive tactics (`by`, `intro`, `simp`, `calc`, `exact`, `have`), "
+            "and `#print axioms` verification at the bottom."
+        ),
     }.get(artifact_type, "")
 
     prompt = f"""TASK: {description}
@@ -661,7 +672,7 @@ def _ext_for_lang(lang: str) -> str:
     return {
         "python": ".py", "typescript": ".ts", "yaml": ".yml",
         "dockerfile": ".dockerfile", "vitalis": ".sl", "javascript": ".js",
-        "rust": ".rs", "go": ".go", "hcl": ".tf", "c": ".c",
+        "rust": ".rs", "go": ".go", "hcl": ".tf", "c": ".c", "lean4": ".lean",
     }.get(lang, ".txt")
 
 

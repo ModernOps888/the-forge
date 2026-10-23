@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import textwrap
 from dataclasses import dataclass, field
@@ -114,6 +115,7 @@ def deploy(
         "docker":       _deploy_docker,
         "skill":        _deploy_skill,
         "full_project": _deploy_agent,
+        "lean4_proof":  _deploy_lean4,
     }
 
     deployer_fn = deployers.get(art.artifact_type, _deploy_generic)
@@ -716,6 +718,65 @@ def _deploy_skill(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     )
 
 
+def _deploy_lean4(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
+    """Lean 4 formal verification project (KLS500 kernel-trust-level-zero pattern)."""
+    files = []
+
+    proof_lean = out / "Proof.lean"
+    proof_lean.write_text(art.source, encoding="utf-8")
+    files.append("Proof.lean")
+
+    lakefile = out / "lakefile.lean"
+    lakefile.write_text(textwrap.dedent(f"""
+        import Lake
+        open Lake DSL
+
+        package «forge_proof_{run_id[:8]}» where
+          leanOptions := #[
+            ⟨`pp.unicode.fun, true⟩,
+            ⟨`autoImplicit, false⟩
+          ]
+
+        @[default_target]
+        lean_lib «Proof» where
+          roots := #[`Proof]
+    """).strip(), encoding="utf-8")
+    files.append("lakefile.lean")
+
+    toolchain = out / "lean-toolchain"
+    toolchain.write_text("leanprover/lean4:stable\n", encoding="utf-8")
+    files.append("lean-toolchain")
+
+    has_sorry = bool(re.search(r"\b(sorry|admit)\b", art.source))
+    trust_note = "⚠️ Contains `sorry`/`admit` axiom placeholder" if has_sorry else "✅ Zero `sorry` axioms (kernel trust level zero ready)"
+
+    readme = out / "README.md"
+    readme.write_text(textwrap.dedent(f"""
+        # Forge Lean 4 Formal Proof — {run_id}
+
+        Status: {trust_note}
+
+        ## Verify at Kernel Trust Level Zero
+        ```bash
+        lake build
+        lean Proof.lean
+        ```
+    """).strip(), encoding="utf-8")
+    files.append("README.md")
+
+    return DeploymentResult(
+        artifact_type="lean4_proof",
+        run_id=run_id,
+        output_path=out,
+        files_created=files,
+        commands=[
+            "lake build",
+            "lean Proof.lean",
+        ],
+        instructions=f"Lean 4 proof project ready ({trust_note}). Run `lake build` to verify with the Lean 4 kernel.",
+    )
+
+
 def _deploy_generic(art: Artifact, run_id: str, out: Path) -> DeploymentResult:
     files = []
     out_file = out / f"output{_ext_for_lang(art.language)}"
@@ -736,5 +797,5 @@ def _ext_for_lang(lang: str) -> str:
     return {
         "python": ".py", "typescript": ".ts", "yaml": ".yml",
         "dockerfile": ".dockerfile", "vitalis": ".sl", "javascript": ".js",
-        "rust": ".rs", "go": ".go", "hcl": ".tf",
+        "rust": ".rs", "go": ".go", "hcl": ".tf", "lean4": ".lean",
     }.get(lang, ".txt")

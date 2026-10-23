@@ -1,7 +1,7 @@
 # The Forge — Enterprise Architecture Document
 
-**Version:** 2.4.0  
-**Date:** 2026-10-22  
+**Version:** 2.5.0  
+**Date:** 2026-10-23  
 **Classification:** Architecture Reference  
 **Author:** Principal AI Systems Architect  
 
@@ -9,16 +9,16 @@
 
 ## 1. Executive Summary
 
-The Forge is a **compiler-powered agentic evolution platform** that orchestrates multiple Large Language Models (LLMs) in competitive code tournaments and an autonomous 17-type Agent Factory. Solutions are compiled through the Vitalis 7-gate pipeline (native Rust FFI, CLI, or sandboxed pure-Python `.sl` interpreter), benchmarked with statistical rigor, and evolved through biologically-inspired operators — producing code that exceeds the capability of any individual model.
+The Forge is a **compiler-powered agentic evolution platform** that orchestrates multiple Large Language Models (LLMs) in competitive code tournaments and an autonomous 18-type Agent Factory. Solutions are compiled through the Vitalis 7-gate pipeline (native Rust FFI, CLI, or sandboxed pure-Python `.sl` interpreter), benchmarked with statistical rigor, and evolved through **KLS Stochastic Localization** and biologically-inspired operators — producing code that exceeds the capability of any individual model.
 
 **Key Differentiator:** The Vitalis compiler pipeline serves as an impartial, deterministic arbiter — providing type safety, capability sandboxing, and sub-millisecond statistical evaluation that no other agent framework offers.
 
 **Core Metrics:**
 - Compile + execute latency: **<5ms** (FFI mode) / **<2ms** (sandboxed pure-Python `.sl` fallback) / ~400ms (CLI mode)
-- Statistical benchmark: **Welford online stats** with Student's $t$ 95% CI, Welch's $t$-test, and MAD outlier detection
-- Selection math: **Native Rust hotpaths + exact Python math fallbacks** — Boltzmann, Bayesian UCB1, quantum annealing
-- Evolution: **8 operators** — 3 crossover (`uniform`, `single_point`, `ast_aware`) + 5 mutation operators with Lévy flight magnitudes
-- Agent Factory: **17 artifact types** across 8 languages with policy-governed auto-deployment and Marketplace publishing
+- Statistical benchmark: **Welford online stats** with Student's $t$ 95% CI, Welch's $t$-test, MAD outlier detection, and **KLS / Poincaré spectral diagnostics** (`kls_spectral_diagnostics`)
+- Selection math: **KLS Stochastic Localization Tilt Selection** (`stochastic_localization_select`), Boltzmann, Bayesian UCB1, quantum annealing, and **Multi-Trajectory Dead-End Pruning**
+- Evolution: **8 operators** — 3 crossover (`uniform`, `single_point`, `ast_aware`) + 5 mutation operators with Lévy flight magnitudes and structural loop/index invariant protection
+- Agent Factory: **18 artifact types** across 9 languages (including `lean4_proof` for kernel-trust-level-zero Lean 4 formal proofs) with policy-governed auto-deployment and Marketplace publishing
 - Governance: **SHA-256 hash-chained provenance**, 10-policy AST-aware `PolicyEngine`, and thread-safe `CircuitBreaker`
 
 ---

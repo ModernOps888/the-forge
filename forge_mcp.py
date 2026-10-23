@@ -649,7 +649,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": "2025-11-25",
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "the-forge", "version": "2.4.0"},
+                "serverInfo": {"name": "the-forge", "version": "2.5.0"},
             },
         }
 

@@ -41,11 +41,31 @@ class EvolutionConfig:
     levy_scale: float = 0.3            # Lévy step scale
     ucb_kappa: float = 1.414           # Bayesian UCB exploration constant
     novelty_threshold: float = 0.10    # min code distance to count as novel
+    use_stochastic_localization: bool = True  # KLS Stochastic Localization tilt selection
+    localization_dt: float = 0.15             # SDE step dt for measure tilting
+    localization_damping: float = 0.25        # Ornstein-Uhlenbeck damping gamma
     seed: Optional[int] = None
 
     def __post_init__(self):
         if self.seed is not None:
             random.seed(self.seed)
+
+
+@dataclass
+class StochasticLocalizationState:
+    """
+    Continuous measure-tilting state for Eldan / Song-Zhang (2026) Stochastic Localization:
+        p_t(x) propto exp(<c_t, x_iso> - (t / (2*d)) * ||x_iso||^2) * p_0(x)
+    """
+    dim: int = 64
+    t: float = 0.0
+    tilt_vector: list[float] = None  # type: ignore[assignment]
+    steps: int = 0
+
+    def __post_init__(self):
+        if self.tilt_vector is None or len(self.tilt_vector) != self.dim:
+            self.tilt_vector = [0.0] * self.dim
+
 
 
 # ── Function Structure Helpers ────────────────────────────────────────────────
@@ -235,15 +255,33 @@ def mutate_insert_guard(src: str) -> tuple[str, str]:
 
 
 def mutate_change_constant(src: str) -> tuple[str, str]:
-    """Alter a numeric literal inside the function body by a Lévy-flight step."""
+    """
+    Alter a tunable numeric literal inside the function body by a Lévy-flight step.
+    Protects structural array/loop invariants (`len() < 2`, `len() / 2`, `.slice(0,`, `i + 1`).
+    """
     header, body, footer = _split_function(src)
     if not body:
         return src, "no_op"
     body_str = "\n".join(body)
-    matches = list(re.finditer(r"\b(\d+)\b", body_str))
-    if not matches:
+    all_matches = list(re.finditer(r"\b(\d+)\b", body_str))
+    if not all_matches:
         return src, "no_op"
-    m = random.choice(matches)
+
+    # Filter out structural loop increments, base-case guards, and zero-index slice bounds
+    safe_matches = []
+    for m in all_matches:
+        ctx_before = body_str[max(0, m.start() - 16) : m.start()]
+        ctx_after = body_str[m.end() : min(len(body_str), m.end() + 8)]
+        if re.search(r"(\.slice\(\s*|\.get\(\s*|\.len\(\)\s*[<=/!]+\s*|\b[ij]\s*[+-]\s*|:\s*i64\s*=\s*)$", ctx_before):
+            continue
+        if re.search(r"^\s*\.\.", ctx_after):
+            continue
+        safe_matches.append(m)
+
+    if not safe_matches:
+        return src, "no_op"
+
+    m = random.choice(safe_matches)
     old = int(m.group())
     u = random.gauss(0, 1)
     v = random.gauss(0, 1)
@@ -360,6 +398,93 @@ def quantum_anneal_accept(old_fitness: float, new_fitness: float, temperature: f
     return _c.hotpath_quantum_anneal_accept(old_fitness, new_fitness, temperature)
 
 
+def stochastic_localization_select(
+    population: list[Submission],
+    state: Optional[StochasticLocalizationState] = None,
+    temperature: float = 1.0,
+    dt: float = 0.15,
+    damping: float = 0.25,
+    advance_step: bool = True,
+) -> Submission:
+    """
+    KLS Stochastic Localization Tilt Selection (Eldan 2013; Song & Zhang 2026, arXiv:2610.01447).
+
+    Centers and isotropically preconditions the population's character n-gram embeddings
+    x_iso in R^d, evolves the localization tilt vector c_t along the standardized fitness
+    gradient direction:
+        c_{t+dt} = (1 - gamma * dt) * c_t + dt * E[a_i * x_iso_i] + sqrt(dt) * eta * xi_t
+    and samples from the tilted log-concave measure:
+        p_t(i) propto exp(f_i / T + <c_t, x_iso_i> - (t / (2 * d)) * ||x_iso_i||^2)
+
+    Preserves an isotropic log-concave sub-measure with dimension-free O(1) KLS spectral mixing.
+    """
+    if not population:
+        raise ValueError("Cannot select from an empty population")
+    scored = [s for s in population if s.fitness is not None]
+    if not scored:
+        return random.choice(population)
+    if len(scored) == 1:
+        return scored[0]
+
+    dim = state.dim if state is not None else 64
+    if state is None:
+        state = StochasticLocalizationState(dim=dim)
+
+    n = len(scored)
+    vecs = [_ngram_vector(s.source_code, dim=dim) for s in scored]
+    fits = [s.fitness.total / 100.0 for s in scored]
+
+    # 1. Isotropic coordinate centering & variance preconditioning
+    coord_means = [sum(vecs[i][j] for i in range(n)) / n for j in range(dim)]
+    coord_vars = [
+        sum((vecs[i][j] - coord_means[j]) ** 2 for i in range(n)) / max(n - 1, 1)
+        for j in range(dim)
+    ]
+    iso_vecs: list[list[float]] = []
+    for i in range(n):
+        iso_vecs.append([
+            (vecs[i][j] - coord_means[j]) / math.sqrt(coord_vars[j])
+            if coord_vars[j] > 1e-12 else 0.0
+            for j in range(dim)
+        ])
+
+    # 2. Standardized fitness advantages a_i
+    f_mean = sum(fits) / n
+    f_std = math.sqrt(sum((f - f_mean) ** 2 for f in fits) / max(n - 1, 1))
+    advantages = [(f - f_mean) / (f_std + 1e-6) for f in fits]
+
+    # 3. Advance the stochastic localization tilt vector c_t once per generation step
+    if advance_step:
+        sqrt_dt = math.sqrt(max(dt, 1e-4))
+        noise_scale = 0.05 / math.sqrt(max(dim, 1))
+        for j in range(dim):
+            grad_j = sum(advantages[i] * iso_vecs[i][j] for i in range(n)) / n
+            state.tilt_vector[j] = (
+                (1.0 - damping * dt) * state.tilt_vector[j]
+                + dt * grad_j
+                + sqrt_dt * noise_scale * random.gauss(0.0, 1.0)
+            )
+        state.t = min(state.t + dt, 5.0)
+        state.steps += 1
+
+    # 4. Compute tilted log-concave log-weights using scale-invariant standardized advantage a_i
+    eff_temp = max(temperature * 0.35, 0.15)
+    logits: list[float] = []
+    for i in range(n):
+        tilt_dot = sum(state.tilt_vector[j] * iso_vecs[i][j] for j in range(dim)) / math.sqrt(max(dim, 1))
+        quad_confine = (state.t / (2.0 * max(dim, 1))) * sum(x * x for x in iso_vecs[i])
+        logits.append((advantages[i] / eff_temp) + 1.5 * tilt_dot - quad_confine)
+
+    probs = _c.hotpath_softmax(logits)
+    r = random.random()
+    cumulative = 0.0
+    for s, p in zip(scored, probs):
+        cumulative += p
+        if r <= cumulative:
+            return s
+    return scored[-1]
+
+
 # ── Generation Pipeline ───────────────────────────────────────────────────────
 
 def evolve_generation(
@@ -368,11 +493,12 @@ def evolve_generation(
     generation_number: int,
     config: EvolutionConfig,
     trial_counts: Optional[dict[str, int]] = None,
+    localization_state: Optional[StochasticLocalizationState] = None,
 ) -> list[Submission]:
     """
     Produce the next generation:
     1. Elite passthrough (top N unchanged)
-    2. Boltzmann + Bayesian UCB parent selection
+    2. KLS Stochastic Localization Tilt + Boltzmann + Bayesian UCB parent selection
     3. Crossover (uniform, single-point, AST-aware)
     4. Quantum-annealed acceptance
     5. Lévy-flight mutation
@@ -385,6 +511,22 @@ def evolve_generation(
     anneal_temp = config.anneal_start_temp * (config.anneal_decay ** generation_number)
     select_temp = max(0.1, config.boltzmann_temp * (config.anneal_decay ** (generation_number * 0.5)))
     offspring: list[Submission] = []
+
+    if config.use_stochastic_localization and localization_state is None:
+        localization_state = StochasticLocalizationState(dim=64, t=generation_number * config.localization_dt)
+
+    # Advance the KLS stochastic localization tilt vector once at the start of the generation
+    if config.use_stochastic_localization and localization_state is not None:
+        scored_parents = [p for p in parents if p.fitness is not None]
+        if len(scored_parents) >= 2:
+            stochastic_localization_select(
+                scored_parents,
+                state=localization_state,
+                temperature=select_temp,
+                dt=config.localization_dt,
+                damping=config.localization_damping,
+                advance_step=True,
+            )
 
     # 1. Elites — pass through unchanged
     elites = elite_select(parents, config.elite_count)
@@ -403,12 +545,33 @@ def evolve_generation(
     # 2. Fill remaining slots
     remaining = max(0, config.population_size - len(offspring))
     for _ in range(remaining):
-        if random.random() < 0.6:
+        r_sel = random.random()
+        if config.use_stochastic_localization and localization_state is not None and r_sel < 0.45:
+            pa = stochastic_localization_select(
+                parents,
+                state=localization_state,
+                temperature=select_temp,
+                dt=config.localization_dt,
+                damping=config.localization_damping,
+                advance_step=False,
+            )
+        elif r_sel < 0.75:
             pa = boltzmann_select(parents, select_temp)
         else:
             pa = bayesian_ucb_select(parents, trial_counts, total_trials, config.ucb_kappa)
 
-        pb = boltzmann_select(parents, select_temp)
+        if config.use_stochastic_localization and localization_state is not None:
+            pb = stochastic_localization_select(
+                parents,
+                state=localization_state,
+                temperature=select_temp,
+                dt=config.localization_dt,
+                damping=config.localization_damping,
+                advance_step=False,
+            )
+        else:
+            pb = boltzmann_select(parents, select_temp)
+
 
         mutations_applied: list[str] = []
         child_code = pa.source_code

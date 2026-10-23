@@ -9,9 +9,12 @@ from .arena import Arena, ArenaConfig
 from .compiler import compile_and_run, type_check, lex, parse_ast, vitalis_version, validate_safety
 from .benchmark import (
     compute_benchmark, compute_ci_95, welford_stats, welch_t_test,
-    adaptive_fitness_score, compute_pareto_front,
+    adaptive_fitness_score, compute_pareto_front, kls_spectral_diagnostics,
 )
-from .evolution import EvolutionConfig, evolve_generation
+from .evolution import (
+    EvolutionConfig, StochasticLocalizationState,
+    stochastic_localization_select, evolve_generation,
+)
 from .budget import CostTracker, BudgetTracker, BudgetConfig, get_tracker
 from .governance import ProvenanceChain, PolicyEngine, CircuitBreaker, get_provenance, get_policy_engine
 from .providers import openrouter_provider, chat, multi_agent_research, consensus, auto_route, MODELS
@@ -27,7 +30,7 @@ from .fitness_engine import score as score_code, score as fitness_score, Vitalis
 from .memory import MemoryEngine, get_memory
 from .tracer import ExecutionTracer, get_tracer
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 __all__ = [
     # Core
     "Arena", "ArenaConfig",
@@ -36,10 +39,11 @@ __all__ = [
     "FitnessScore", "BenchmarkResult", "CompilationResult",
     # Compiler
     "compile_and_run", "type_check", "lex", "parse_ast", "vitalis_version", "validate_safety",
-    # Benchmark
-    "compute_benchmark", "compute_ci_95", "welford_stats", "welch_t_test", "adaptive_fitness_score", "compute_pareto_front",
-    # Evolution
-    "EvolutionConfig", "evolve_generation",
+    # Benchmark & KLS Spectral Diagnostics
+    "compute_benchmark", "compute_ci_95", "welford_stats", "welch_t_test",
+    "adaptive_fitness_score", "compute_pareto_front", "kls_spectral_diagnostics",
+    # Evolution & Stochastic Localization
+    "EvolutionConfig", "StochasticLocalizationState", "stochastic_localization_select", "evolve_generation",
     # Budget & Cost
     "CostTracker", "BudgetTracker", "BudgetConfig", "get_tracker",
     # Governance

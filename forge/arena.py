@@ -30,14 +30,16 @@ from . import compiler as _c
 from .benchmark import (
     compute_benchmark, compute_fitness_performance, adaptive_fitness_score,
     native_code_quality, compute_pareto_front, measure_diversity,
-    FitnessTrend,
+    FitnessTrend, kls_spectral_diagnostics,
 )
 from .evolution import (
-    EvolutionConfig, evolve_generation, code_novelty, code_fingerprint,
+    EvolutionConfig, StochasticLocalizationState, evolve_generation,
+    code_novelty, code_fingerprint, _ngram_vector,
 )
 from .governance import get_provenance
 
 ProviderFn = Callable[[str, str], str]
+DirectorHookFn = Callable[[Generation, dict], Optional[list[str]]]
 
 
 # ── Arena Configuration ───────────────────────────────────────────────────────
@@ -63,8 +65,15 @@ class ArenaConfig:
     # Evolution settings
     evo: EvolutionConfig = field(default_factory=EvolutionConfig)
 
+    # KLS Stochastic Localization & Multi-Trajectory Pruning (MSR Song & Zhang 2026)
+    enable_trajectory_pruning: bool = True
+    trajectory_prune_patience: int = 2
+    trajectory_prune_gap: float = 12.0   # fitness gap below champion to flag dead-end lineage
+    director_hook: Optional[DirectorHookFn] = None
+
     verbose: bool = True
     use_vitalis_native_evo: bool = True   # dual-track with slang_evo_* engine
+
 
     def weights_dict(self) -> dict[str, float]:
         return {
@@ -211,6 +220,10 @@ class Arena:
         self._trial_counts: dict[str, int] = {}
         self._trend = FitnessTrend(alpha=0.3)
         self._seen_fingerprints: set[str] = set()
+        self._localization_state = StochasticLocalizationState(dim=64)
+        self._lineage_stagnation: dict[str, int] = {}
+        self.pruned_trajectories: int = 0
+        self.kls_history: list[dict] = []
 
         # Sync evo config from arena config
         self.config.evo.population_size = self.config.population_size
@@ -218,6 +231,97 @@ class Arena:
 
     def register_provider(self, name: str, fn: ProviderFn) -> None:
         self.providers[name] = fn
+
+    def _compute_generation_kls(self, gen: Generation) -> dict:
+        """Compute KLS isoperimetric & Poincaré spectral diagnostics for a generation."""
+        scored = [s for s in gen.submissions if s.fitness is not None]
+        if len(scored) < 2:
+            diag = kls_spectral_diagnostics([], [])
+        else:
+            vecs = [_ngram_vector(s.source_code, dim=64) for s in scored]
+            fits = [s.fitness.total for s in scored]
+            diag = kls_spectral_diagnostics(vecs, fits)
+        self.kls_history.append(diag)
+        return diag
+
+    def _prune_dead_end_trajectories(
+        self,
+        gen: Generation,
+        kls_diag: dict,
+        tournament_id: str = "",
+    ) -> list[Submission]:
+        """
+        MSR Song-Zhang (2026) Multi-Trajectory Dead-End Pruning + Human Director Steering:
+        - Prunes lineages that lag the generation champion by >= trajectory_prune_gap
+          for >= trajectory_prune_patience consecutive generations (always preserving elites).
+        - Applies optional director_hook(gen, kls_diag) to allow human/external steering.
+        """
+        scored = [s for s in gen.submissions if s.fitness is not None]
+        if len(scored) <= max(2, self.config.elite_count):
+            return gen.submissions
+
+        # Optional human-director steering hook (returns allowed submission IDs if steering)
+        if self.config.director_hook is not None:
+            try:
+                keep_ids = self.config.director_hook(gen, kls_diag)
+                if keep_ids:
+                    keep_set = set(keep_ids)
+                    steered = [s for s in gen.submissions if s.id in keep_set]
+                    if steered:
+                        self.pruned_trajectories += len(gen.submissions) - len(steered)
+                        return steered
+            except Exception:
+                pass
+
+        if not self.config.enable_trajectory_pruning:
+            return gen.submissions
+
+        champ_fit = gen.champion_fitness
+        ranked = sorted(scored, key=lambda s: s.fitness.total, reverse=True)
+        elite_ids = {s.id for s in ranked[: max(1, self.config.elite_count)]}
+
+        surviving: list[Submission] = []
+        pruned_ids: list[str] = []
+
+        for s in gen.submissions:
+            if s.fitness is None:
+                pruned_ids.append(s.id)
+                continue
+            if s.id in elite_ids:
+                self._lineage_stagnation[s.id] = 0
+                surviving.append(s)
+                continue
+
+            parent_key = s.parent_a_id or s.id
+            gap = champ_fit - s.fitness.total
+            if gap >= self.config.trajectory_prune_gap:
+                stag = self._lineage_stagnation.get(parent_key, 0) + 1
+                self._lineage_stagnation[s.id] = stag
+                if stag >= self.config.trajectory_prune_patience:
+                    pruned_ids.append(s.id)
+                    continue
+            else:
+                self._lineage_stagnation[s.id] = 0
+            surviving.append(s)
+
+        if not surviving:
+            return ranked[: max(1, self.config.elite_count)]
+
+        if pruned_ids:
+            self.pruned_trajectories += len(pruned_ids)
+            if tournament_id:
+                get_provenance().record(
+                    "trajectory_pruned",
+                    tournament_id,
+                    "arena",
+                    {
+                        "generation": gen.number,
+                        "pruned_count": len(pruned_ids),
+                        "surviving_count": len(surviving),
+                        "poincare_ratio": kls_diag.get("poincare_ratio", 0.0),
+                    },
+                )
+        return surviving
 
     def run(self, challenge: Challenge) -> Tournament:
         """Execute a full evolutionary tournament. Returns complete Tournament."""
@@ -260,6 +364,7 @@ class Arena:
         # ── Generation 0: Seed from LLMs ──────────────────────────────
         gen_0 = self._seed_generation(challenge, tournament.id)
         tournament.generations.append(gen_0)
+        kls_0 = self._compute_generation_kls(gen_0)
         self._log_gen(gen_0, [])
 
         if not gen_0.submissions:
@@ -271,27 +376,32 @@ class Arena:
         # ── Generations 1–N: Evolve ────────────────────────────────────
         stale = 0
         best_fitness = gen_0.champion_fitness
+        active_parents = self._prune_dead_end_trajectories(gen_0, kls_0, tournament.id)
 
         for gen_num in range(1, self.config.max_generations + 1):
             prev = tournament.generations[-1]
             all_sources = [s.source_code for s in prev.submissions if s.fitness]
 
             offspring = evolve_generation(
-                parents=prev.submissions,
+                parents=active_parents,
                 challenge_id=challenge.id,
                 generation_number=gen_num,
                 config=self.config.evo,
                 trial_counts=self._trial_counts,
+                localization_state=self._localization_state,
             )
 
             gen = self._evaluate_generation(offspring, challenge, gen_num, all_sources, tournament.id)
             tournament.generations.append(gen)
+            kls_diag = self._compute_generation_kls(gen)
+            active_parents = self._prune_dead_end_trajectories(gen, kls_diag, tournament.id)
 
             ema = self._trend.update(gen.champion_fitness)
             diversity = measure_diversity([s.fitness.total for s in gen.submissions if s.fitness])
             self._log_gen(gen, all_sources, diversity=diversity, ema=ema)
 
             self._vitalis_evo_register(challenge, gen)
+
 
             if gen.champion_fitness > best_fitness + self.config.convergence_delta:
                 best_fitness = gen.champion_fitness
@@ -426,8 +536,7 @@ class Arena:
                 novelty = raw_novelty
             all_sources.append(sub.source_code)
 
-            speed_proxy = 1.0 / max(result.compile_time_ms, 0.1)
-            speed_norm = min(speed_proxy / 10.0, 1.0)
+            speed_norm = min(1.0, 5.0 / max(result.compile_time_ms, 5.0))
 
             adaptive = adaptive_fitness_score(
                 speed=speed_norm,
